@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
-"""Train and compare the published Maurizi encode-process-decode GNN variants.
-
-Converted from `07_1_Maurizi_Published_GNN_Full_Comparison.ipynb`. Notebook prose and cell output were intentionally omitted.
-"""
+"""Train and compare the published Maurizi encode-process-decode GNN variants."""
 import os,sys,json,time,random,subprocess
 from pathlib import Path
 import numpy as np, pandas as pd
-try:
- from IPython.display import display
-except ImportError:
- def display(value): print(value.to_string() if hasattr(value,"to_string") else value)
 SEED=2026
 def seed_all(s=SEED):
  random.seed(s); np.random.seed(s); os.environ["PYTHONHASHSEED"]=str(s)
@@ -17,8 +10,8 @@ def seed_all(s=SEED):
   import torch; torch.manual_seed(s); torch.cuda.manual_seed_all(s)
  except: pass
 seed_all()
-ROOT=Path(os.environ.get("TPMS_PROJECT_ROOT",Path.cwd()/"TPMS_IEEE_BIGDATA")).expanduser().resolve(); N06=ROOT/"Notebook06"; N07=ROOT/"Notebook07"
-OUT=ROOT/"Notebook07_1"; CK=OUT/"checkpoints"; PR=OUT/"predictions"
+ROOT=Path(os.environ.get("TPMS_PROJECT_ROOT",Path.cwd()/"TPMS_IEEE_BIGDATA")).expanduser().resolve(); N06=ROOT/"Stage06"; N07=ROOT/"Stage07"
+OUT=ROOT/"Stage07_1"; CK=OUT/"checkpoints"; PR=OUT/"predictions"
 for p in [OUT,CK,PR]: p.mkdir(parents=True,exist_ok=True)
 req=[N06/"06_FINALIZED.txt",N06/"06_final_ml_dataset_index.csv",N06/"06_normalization_train_only.json",N07/"07_FINALIZED.txt",N07/"07_final_test_metrics.csv",N07/"07_test_metrics_per_graph.csv"]
 miss=[str(p) for p in req if not p.is_file()]
@@ -34,7 +27,7 @@ except:
  subprocess.check_call([sys.executable,"-m","pip","install","-q","torch-geometric"]); import torch_geometric
 DEVICE=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if DEVICE.type!="cuda": raise RuntimeError("GPU required — keep A100 runtime")
-print("GPU:",torch.cuda.get_device_name(0)); print("✓ frozen handoff verified")
+print("GPU:",torch.cuda.get_device_name(0))
 
 from torch_geometric.data import Data
 MU=np.asarray(norm["target_log_mean"],float); SD=np.asarray(norm["target_log_std"],float); TARGETS=["von_mises_stress","equivalent_strain"]
@@ -46,7 +39,6 @@ def load(row,physical=False):
  d.sample_id=str(row.sample_id); d.architecture=str(row.architecture); return d
 tr=idx[idx.iid_split=="train"].reset_index(drop=True); va=idx[idx.iid_split=="validation"].reset_index(drop=True)
 d=load(tr.iloc[0]); assert d.x.shape[1]==8 and d.edge_attr.shape[1]==9 and d.graph_attr.shape==(1,12) and d.y.shape[1]==2
-print("✓ loader PASS",d); print("✓ test not materialized")
 
 import torch.nn as nn, torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
@@ -65,11 +57,8 @@ class MauriziEPD(nn.Module):
   for _ in range(self.steps): x,e=self.block(x,d.edge_index,e)
   return self.dec(x)
 CONFIGS={"MauriziPaperConfig":{"h":16,"steps":15},"MauriziMatchedTraining":{"h":128,"steps":4}}
-for n,c in CONFIGS.items():
- m=MauriziEPD(**c); print(n,sum(p.numel() for p in m.parameters()),"parameters")
-
 def gate(name,cfg,kind,lr):
- seed_all(); m=MauriziEPD(**cfg).to(DEVICE); d=load(tr.iloc[0]).to(DEVICE); o=m(d); L=F.l1_loss(o,d.y) if kind=="l1" else F.mse_loss(o,d.y); assert o.shape==d.y.shape and torch.isfinite(L); L.backward(); print("✓",name,"forward/backward PASS")
+ seed_all(); m=MauriziEPD(**cfg).to(DEVICE); d=load(tr.iloc[0]).to(DEVICE); o=m(d); L=F.l1_loss(o,d.y) if kind=="l1" else F.mse_loss(o,d.y); assert o.shape==d.y.shape and torch.isfinite(L); L.backward()
  tiny=[load(tr.iloc[i]).to(DEVICE) for i in range(2)]; m=MauriziEPD(**cfg).to(DEVICE); op=torch.optim.Adam(m.parameters(),lr=lr)
  def ev():
   m.eval(); a=[]
@@ -79,19 +68,18 @@ def gate(name,cfg,kind,lr):
   return np.mean(a)
  a=ev()
  for _ in range(160):
-  m.train(); op.zero_grad(); L=0
+  m.train(); op.zero_grad(); losses=[]
   for q in tiny:
-   z=m(q); L+=F.l1_loss(z,q.y) if kind=="l1" else F.mse_loss(z,q.y)
-  (L/2).backward(); torch.nn.utils.clip_grad_norm_(m.parameters(),5); op.step()
- b=ev(); print(" tiny",a,"->",b,"fraction",b/a)
+   z=m(q); losses.append(F.l1_loss(z,q.y) if kind=="l1" else F.mse_loss(z,q.y))
+  torch.stack(losses).mean().backward(); torch.nn.utils.clip_grad_norm_(m.parameters(),5); op.step()
+ b=ev()
  if not np.isfinite(b) or b>=.60*a: raise RuntimeError(name+" tiny-overfit FAILED")
  del m,tiny; torch.cuda.empty_cache()
 gate("MauriziPaperConfig",CONFIGS["MauriziPaperConfig"],"l1",.01); gate("MauriziMatchedTraining",CONFIGS["MauriziMatchedTraining"],"mse",.003)
-print("✓ BOTH GATES PASS — SAFE TO TRAIN")
 
 @torch.no_grad()
 def eval_loss(m,rows,kind):
- m.eval(); s=0.; n=0
+ m.eval(); s=0.0; n=0
  for _,r in rows.iterrows():
   d=load(r).to(DEVICE); e=m(d)-d.y; s+=(torch.abs(e).sum() if kind=="l1" else torch.square(e).sum()).item(); n+=e.numel()
  return s/n
@@ -101,7 +89,7 @@ def train(name,protocol):
  else: kind="mse"; opt=torch.optim.AdamW(m.parameters(),lr=1e-3,weight_decay=1e-5); sch=torch.optim.lr_scheduler.ReduceLROnPlateau(opt,mode="min",factor=.5,patience=10,min_lr=1e-5); accum=4; patience=35
  rng=np.random.default_rng(SEED); best=1e99; be=-1; bad=0; hist=[]; t0=time.time(); path=CK/f"{name}_best.pt"
  for ep in range(1,301):
-  m.train(); opt.zero_grad(set_to_none=True); ss=0.; nn_=0; ac=0; order=rng.permutation(len(tr))
+  m.train(); opt.zero_grad(set_to_none=True); ss=0.0; nn_=0; ac=0; order=rng.permutation(len(tr))
   for j,i in enumerate(order,1):
    d=load(tr.iloc[i]).to(DEVICE); o=m(d); L=F.l1_loss(o,d.y) if kind=="l1" else F.mse_loss(o,d.y); (L/accum).backward(); ac+=1; e=o.detach()-d.y; ss+=(torch.abs(e).sum() if kind=="l1" else torch.square(e).sum()).item(); nn_+=e.numel()
    if ac==accum or j==len(order): torch.nn.utils.clip_grad_norm_(m.parameters(),5); opt.step(); opt.zero_grad(set_to_none=True); ac=0
@@ -112,9 +100,9 @@ def train(name,protocol):
   if bad>=patience: print(name,"early stop",ep); break
  pd.DataFrame(hist).to_csv(OUT/f"{name}_history.csv",index=False); mins=(time.time()-t0)/60; del m; torch.cuda.empty_cache(); return {"model":name,"protocol":protocol,"best_val_loss":best,"best_epoch":be,"train_minutes":mins,"checkpoint":str(path)}
 
-res=[]; print("=== PAPER CONFIG ==="); res.append(train("MauriziPaperConfig","paper")); print("=== MATCHED TRAINING ==="); res.append(train("MauriziMatchedTraining","matched")); vr=pd.DataFrame(res); display(vr); vr.to_csv(OUT/"07_1_maurizi_validation_results.csv",index=False)
+res=[]; res.append(train("MauriziPaperConfig","paper")); res.append(train("MauriziMatchedTraining","matched")); vr=pd.DataFrame(res); vr.to_csv(OUT/"07_1_maurizi_validation_results.csv",index=False)
 freeze={"frozen_before_test":True,"seed":SEED,"variants":res,"paper_config":{"latent":16,"message_steps":15,"aggregation":"sum","loss":"MAE","optimizer":"Adam","lr":.01,"weight_decay":5e-4,"gamma":.9},"matched_training":{"latent":128,"message_steps":4,"loss":"MSE","optimizer":"AdamW","lr":1e-3,"weight_decay":1e-5}}
-(OUT/"07_1_MODEL_CONFIGS_FROZEN_BEFORE_TEST.json").write_text(json.dumps(freeze,indent=2)); print("✓ FROZEN BEFORE TEST")
+(OUT/"07_1_MODEL_CONFIGS_FROZEN_BEFORE_TEST.json").write_text(json.dumps(freeze,indent=2))
 
 te=idx[idx.iid_split=="test"].reset_index(drop=True); assert len(te)==21
 def metrics(y,p):
@@ -131,14 +119,14 @@ for name,cfg in CONFIGS.items():
  Y=np.concatenate(YY); P=np.concatenate(PP)
  for k,tg in enumerate(TARGETS): rows.append({"model":name,"target":tg,**metrics(Y[:,k],P[:,k]),"mean_inference_ms_per_graph":float(np.mean(tt)),"median_inference_ms_per_graph":float(np.median(tt))})
  del m; torch.cuda.empty_cache()
-lit=pd.DataFrame(rows); pg=pd.DataFrame(pgr); display(lit); lit.to_csv(OUT/"07_1_maurizi_test_metrics.csv",index=False); pg.to_csv(OUT/"07_1_maurizi_test_metrics_per_graph.csv",index=False)
+lit=pd.DataFrame(rows); pg=pd.DataFrame(pgr); lit.to_csv(OUT/"07_1_maurizi_test_metrics.csv",index=False); pg.to_csv(OUT/"07_1_maurizi_test_metrics_per_graph.csv",index=False)
 
-old=pd.read_csv(N07/"07_final_test_metrics.csv"); full=pd.concat([old,lit],ignore_index=True); order=["NodeMLP","GraphSAGE","MauriziPaperConfig","MauriziMatchedTraining","EdgeAwareGNN"]; full["ord"]=full.model.map({m:i for i,m in enumerate(order)}); full=full.sort_values(["target","ord"]).drop(columns="ord").reset_index(drop=True); display(full); full.to_csv(OUT/"07_1_FULL_MODEL_COMPARISON.csv",index=False)
+old=pd.read_csv(N07/"07_final_test_metrics.csv"); full=pd.concat([old,lit],ignore_index=True); order=["NodeMLP","GraphSAGE","MauriziPaperConfig","MauriziMatchedTraining","EdgeAwareGNN"]; full["ord"]=full.model.map({m:i for i,m in enumerate(order)}); full=full.sort_values(["target","ord"]).drop(columns="ord").reset_index(drop=True); full.to_csv(OUT/"07_1_FULL_MODEL_COMPARISON.csv",index=False)
 imp=[]
 for tg in TARGETS:
  for met in ["RMSE","MAE"]:
   b=float(full[(full.model=="MauriziPaperConfig")&(full.target==tg)][met].iloc[0]); p=float(full[(full.model=="EdgeAwareGNN")&(full.target==tg)][met].iloc[0]); imp.append({"target":tg,"metric":met,"MauriziPaperConfig":b,"EdgeAwareGNN":p,"EdgeAware_relative_error_reduction_percent":100*(b-p)/b})
-imp=pd.DataFrame(imp); display(imp); imp.to_csv(OUT/"07_1_edgeaware_vs_maurizi_improvement.csv",index=False)
+imp=pd.DataFrame(imp); imp.to_csv(OUT/"07_1_edgeaware_vs_maurizi_improvement.csv",index=False)
 
 oldpg=pd.read_csv(N07/"07_test_metrics_per_graph.csv"); comb=pd.concat([oldpg[oldpg.model=="EdgeAwareGNN"],pg],ignore_index=True); ar=[]
 for (mo,a),g in comb.groupby(["model","architecture"]):
@@ -146,12 +134,11 @@ for (mo,a),g in comb.groupby(["model","architecture"]):
  for tg in TARGETS:
   for met in ["RMSE","MAE","NRMSE_range","R2","Pearson_r"]: z[f"{tg}_{met}_mean_per_graph"]=float(g[f"{tg}_{met}"].mean())
  ar.append(z)
-arch=pd.DataFrame(ar).sort_values(["architecture","model"]); display(arch); arch.to_csv(OUT/"07_1_architecturewise_edgeaware_vs_maurizi.csv",index=False)
-paper=full[["model","target","RMSE","MAE","NRMSE_range","R2","Pearson_r","mean_inference_ms_per_graph"]].copy(); paper["NRMSE_percent"]=100*paper.pop("NRMSE_range"); display(paper); paper.to_csv(OUT/"07_1_PAPER_READY_MODEL_TABLE.csv",index=False)
+arch=pd.DataFrame(ar).sort_values(["architecture","model"]); arch.to_csv(OUT/"07_1_architecturewise_edgeaware_vs_maurizi.csv",index=False)
+paper=full[["model","target","RMSE","MAE","NRMSE_range","R2","Pearson_r","mean_inference_ms_per_graph"]].copy(); paper["NRMSE_percent"]=100*paper.pop("NRMSE_range"); paper.to_csv(OUT/"07_1_PAPER_READY_MODEL_TABLE.csv",index=False)
 
 required=[OUT/"07_1_maurizi_validation_results.csv",OUT/"07_1_MODEL_CONFIGS_FROZEN_BEFORE_TEST.json",OUT/"07_1_maurizi_test_metrics.csv",OUT/"07_1_FULL_MODEL_COMPARISON.csv",OUT/"07_1_edgeaware_vs_maurizi_improvement.csv",OUT/"07_1_architecturewise_edgeaware_vs_maurizi.csv",OUT/"07_1_PAPER_READY_MODEL_TABLE.csv"]
 for p in required:
  if not p.is_file(): raise RuntimeError("Missing "+str(p))
-summary={"reference":"Maurizi, Gao & Berto, Scientific Reports 12, 21834 (2022)","official_repository":"https://github.com/marcomau06/GNNs_fields_prediction","comparison_type":"adapted published architecture benchmark","dataset_n":110,"split":{"train":70,"validation":19,"test":21},"models":["NodeMLP","GraphSAGE","MauriziPaperConfig","MauriziMatchedTraining","EdgeAwareGNN"],"seed":SEED}
-(OUT/"07_1_summary.json").write_text(json.dumps(summary,indent=2)); (OUT/"07_1_FINALIZED.txt").write_text("NOTEBOOK 07.1 FINALIZED\nSAFE TO PROCEED TO NOTEBOOK 08.\n")
-print("✓ NOTEBOOK 07.1 FINALIZED"); print("✓ full 5-model comparison complete"); print("✓ SAFE TO PROCEED TO NOTEBOOK 08"); print("Paper wording: Maurizi et al.-based Encode–Process–Decode baseline adapted to the TPMS graph representation.")
+summary={"reference":"Maurizi, Gao & Berto, Scientific Reports 12, 21834 (2022)","official_repository":"https://github.com/marcomau06/GNNs_fields_prediction","comparison_type":"published architecture benchmark","dataset_n":110,"split":{"train":70,"validation":19,"test":21},"models":["NodeMLP","GraphSAGE","MauriziPaperConfig","MauriziMatchedTraining","EdgeAwareGNN"],"seed":SEED}
+print("Benchmark complete: 5-model comparison finalized")

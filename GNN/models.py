@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GNN model definitions extracted from Notebook 07."""
+"""GNN model definitions."""
 
 import torch
 import torch.nn as nn
@@ -9,12 +9,6 @@ from torch_geometric.nn import MessagePassing, SAGEConv
 HIDDEN_DIM = 128
 NUM_LAYERS = 4
 DROPOUT = 0.10
-# ============================================================
-# MODULE 3 — MODEL DEFINITIONS
-# ============================================================
-import torch.nn as nn
-import torch.nn.functional as F
-from torch_geometric.nn import SAGEConv, MessagePassing
 
 def expand_graph_attr(data):
     return data.graph_attr.expand(data.x.size(0), -1)
@@ -108,8 +102,3 @@ MODEL_FACTORIES = {
     "GraphSAGE": lambda: GraphSAGEBaseline(),
     "EdgeAwareGNN": lambda: EdgeAwareGNN(),
 }
-
-for name, factory in MODEL_FACTORIES.items():
-    m = factory()
-    n_params = sum(p.numel() for p in m.parameters() if p.requires_grad)
-    print(f"{name:14s}: {n_params:,} trainable parameters")

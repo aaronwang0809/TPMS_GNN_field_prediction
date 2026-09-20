@@ -1,26 +1,13 @@
 #!/usr/bin/env python3
 """Run full-field FEA and map element fields onto a canonical graph.
 
-Converted from `02_8_CORRECTED_FEA_to_Canonical_Graph_Ground_Truth_Mapping.ipynb`. Notebook prose and cell output were intentionally omitted.
 """
-# MODULE 0 — Install
-# Notebook-only command removed: !apt-get update -qq
-# Notebook-only command removed: !apt-get install -y -qq calculix-ccx
-# Notebook-only command removed: %pip install -q numpy pandas scipy matplotlib psutil torch-geometric
-print("✓ Dependencies installed")
 
-# MODULE 1 — Imports, directories, frozen protocol
-import os,re,gc,json,time,shutil,hashlib,subprocess,zipfile,sys
+import re,json,time,shutil,subprocess,zipfile
 from pathlib import Path
-import numpy as np, pandas as pd, matplotlib.pyplot as plt, psutil
+import numpy as np, pandas as pd, matplotlib.pyplot as plt
 from scipy.spatial import cKDTree
 import torch
-
-try:
-    from IPython.display import display
-except ImportError:
-    def display(value):
-        print(value.to_string() if hasattr(value, "to_string") else value)
 
 SEED=42
 np.random.seed(SEED)
@@ -35,36 +22,20 @@ TARGET_MACRO_STRAIN=0.01
 MAPPING_K_VALUES=[16,32,64]
 PRIMARY_K=32
 IDW_POWER=2.0
+MAX_MAPPING_RELATIVE_RMSE=0.10
 NORMAL_Z_MIN=0.80
 
 CCX=shutil.which("ccx")
 assert CCX is not None, "CalculiX ccx not found."
-print("CalculiX:",CCX)
-print("RAM available:",round(psutil.virtual_memory().available/1e9,2),"GB")
-
-# MODULE 2 — Upload and unpack the standalone handoff bundle
-try:
-    from google.colab import files
-    uploaded=files.upload()
-    candidates=[Path(x) for x in uploaded if x.endswith(".zip")]
-    if not candidates:
-        raise RuntimeError("Upload 02_8_inputs.zip.")
-    bundle=candidates[0]
-except ImportError:
-    candidates=list(Path.cwd().glob("02_8_inputs.zip"))+list(INPUT.glob("02_8_inputs.zip"))
-    if not candidates:
-        raise RuntimeError("Place 02_8_inputs.zip in the working directory.")
-    bundle=candidates[0]
+candidates=list(Path.cwd().glob("02_8_inputs.zip"))+list(INPUT.glob("02_8_inputs.zip"))
+if not candidates:
+    raise RuntimeError("Place 02_8_inputs.zip in the working directory or input directory.")
+bundle=candidates[0]
 
 with zipfile.ZipFile(bundle,"r") as z:
     z.extractall(INPUT)
 
-print("Bundle contents:")
-for p in sorted(INPUT.rglob("*")):
-    if p.is_file():
-        print(" ",p.relative_to(INPUT),f"{p.stat().st_size/1e6:.2f} MB")
 
-# MODULE 3 — Load and validate frozen FE mesh + actual Notebook-01.2 PyG graph
 mesh_file=next(iter(INPUT.rglob("balanced_mesh.npz")),None)
 graph_file=next(iter(INPUT.rglob("canonical_structural_graph_128.pt")),None)
 book_file=next(iter(INPUT.rglob("02_7_final_convergence_bookkeeping.json")),None)
@@ -80,7 +51,6 @@ m=np.load(mesh_file)
 P=np.asarray(m["points"],np.float64)
 T=np.asarray(m["tets"],np.int64)
 
-# Notebook 01.2 saved a torch_geometric.data.Data object.
 try:
     struct_data=torch.load(graph_file,map_location="cpu",weights_only=False)
 except TypeError:
@@ -96,8 +66,6 @@ GPOS=struct_data.pos.detach().cpu().numpy().astype(np.float64,copy=False)
 EDGE_INDEX=struct_data.edge_index.detach().cpu().numpy().astype(np.int64,copy=False)
 DIRECTED_EDGE_ATTR=struct_data.edge_attr.detach().cpu().numpy().astype(np.float32,copy=False)
 
-# 01.2 stores 612 directed PyG edges = two directions for 306 structural edges.
-# Freeze one canonical undirected copy for NPZ export while preserving the original PyG object.
 src,dst=EDGE_INDEX
 keep=src<dst
 GEDGES=np.stack([src[keep],dst[keep]],axis=1)
@@ -105,14 +73,6 @@ GEDGE_ATTR=DIRECTED_EDGE_ATTR[keep]
 
 book=json.loads(book_file.read_text())
 
-print("FE mesh:",P.shape,T.shape)
-print("Frozen PyG graph:",struct_data)
-print("Canonical positions:",GPOS.shape)
-print("Directed PyG edges:",EDGE_INDEX.shape[1])
-print("Undirected canonical edges:",GEDGES.shape)
-print("Edge attributes:",GEDGE_ATTR.shape)
-print("Bookkeeping stress-field pass:",book.get("stress_field_convergence_pass"))
-print("Bookkeeping production tets:",book.get("production_tets"))
 
 assert len(T)==1_901_495, f"Expected frozen balanced mesh (1,901,495 tets), got {len(T):,}"
 assert GX.shape==(197,8), f"Expected frozen x=[197,8], got {GX.shape}"
@@ -124,9 +84,7 @@ assert book.get("stress_field_convergence_pass") is True
 assert book.get("production_mesh")=="balanced"
 assert int(book.get("production_tets"))==len(T)
 
-print("✓ Actual Notebook-01.2 PyG graph + frozen FE input QC PASS")
 
-# MODULE 4 — True exterior-facet BCs and deck helpers
 def exterior_faces(t):
     ff=np.vstack([t[:,[0,2,1]],t[:,[0,1,3]],t[:,[1,2,3]],t[:,[2,0,3]]])
     ss=np.sort(ff,axis=1)
@@ -137,8 +95,6 @@ def exterior_faces(t):
     ends=np.r_[starts[1:],len(s)]
     return ff[order[starts[(ends-starts)==1]]]
 
-# Reconstruct the accepted 128-grid pitch from FE specimen extent.
-# Frozen geometry spans approximately 20 mm; the earlier protocol used pitch=height/128.
 height=float(P[:,2].max()-P[:,2].min())
 pitch=height/128.0
 TOP_DISPLACEMENT_MM=-TARGET_MACRO_STRAIN*height
@@ -162,13 +118,8 @@ def write_ids(f,ids,n=16,one_based=True):
     for i in range(0,len(z),n):
         f.write(",".join(map(str,z[i:i+n]))+"\n")
 
-print("height:",height,"mm")
-print("top displacement:",TOP_DISPLACEMENT_MM,"mm")
-print("bottom nodes:",len(bottom),"top nodes:",len(top))
 assert len(bottom)>1000 and len(top)>1000
-print("✓ Physical exterior-facet BC reconstruction PASS")
 
-# MODULE 5 — Write production full-field CalculiX deck
 deck=RUN/"model.inp"
 with open(deck,"w",buffering=1024*1024) as f:
     f.write("*HEADING\nTPMS production full-field solve for graph mapping\n*NODE\n")
@@ -193,11 +144,7 @@ with open(deck,"w",buffering=1024*1024) as f:
 
 first=deck.read_text(errors="strict").splitlines()[:4]
 assert first[0]=="*HEADING" and first[2]=="*NODE"
-print("Deck sanity PASS:",first)
-print("Deck size:",round(deck.stat().st_size/1e6,1),"MB")
-print("RAM available:",round(psutil.virtual_memory().available/1e9,2),"GB")
 
-# MODULE 6 — Run production FEA exactly once
 dat=RUN/"model.dat"
 if dat.exists() and dat.stat().st_size>1_000_000:
     print("Existing production model.dat found; solve is NOT rerun.")
@@ -210,11 +157,8 @@ else:
     if cp.returncode!=0:
         print(cp.stdout[-5000:]); print(cp.stderr[-5000:])
         raise RuntimeError("Production full-field CalculiX solve failed.")
-    print("✓ Production solve completed")
+    print("Production solve completed")
 
-print("DAT:",round(dat.stat().st_size/1e6,1),"MB")
-
-# MODULE 7 — Inspect actual DAT headings before parsing
 heads=[]
 with open(dat,"r",errors="ignore") as f:
     for line in f:
@@ -222,14 +166,11 @@ with open(dat,"r",errors="ignore") as f:
         if ("stresses (" in lo or "strains (" in lo or "forces (" in lo):
             heads.append(line.strip())
             if len(heads)>=10: break
-print("\n".join(heads))
 if not any("stresses" in h.lower() for h in heads):
     raise RuntimeError("Stress section not found.")
 if not any("strains" in h.lower() for h in heads):
     raise RuntimeError("Strain section not found. STOP before mapping.")
-print("✓ Stress + strain sections detected")
 
-# MODULE 8 — Streaming full-field parser (float32, element ordered)
 N=len(T)
 S=np.full((N,6),np.nan,dtype=np.float32)
 Eps=np.full((N,6),np.nan,dtype=np.float32)
@@ -267,25 +208,16 @@ with open(dat,"r",errors="ignore") as f:
 
 validS=np.all(np.isfinite(S),axis=1)
 validE=np.all(np.isfinite(Eps),axis=1)
-print("reaction rows:",rf_count,"reaction N:",rf_sum)
-print("stress valid:",validS.sum(),"/",N)
-print("strain valid:",validE.sum(),"/",N)
 if validS.mean()<0.999 or validE.mean()<0.999:
     raise RuntimeError("Full-field parser did not recover >=99.9% of elements.")
-print("✓ Full stress/strain field parsed")
 
-# MODULE 9 — Derived FE invariants + constitutive consistency QC
 def von_mises(A):
     a,b,c,d,e,f=[A[:,i].astype(np.float64) for i in range(6)]
     return np.sqrt(.5*((a-b)**2+(b-c)**2+(c-a)**2)+3*(d*d+e*e+f*f))
 
 VM=von_mises(S).astype(np.float32)
 
-# CalculiX component order from the printed tensor is:
-# xx, yy, zz, xy, xz, yz.
-# Equivalent strain uses engineering shear strains for printed E.
 ex,ey,ez,gxy,gxz,gyz=[Eps[:,i].astype(np.float64) for i in range(6)]
-# deviatoric normal strain + tensor shear = engineering shear/2
 m=(ex+ey+ez)/3
 EQ=np.sqrt((2/3)*((ex-m)**2+(ey-m)**2+(ez-m)**2 +
                   2*((gxy/2)**2+(gxz/2)**2+(gyz/2)**2))).astype(np.float32)
@@ -296,7 +228,6 @@ print("Equivalent strain median/P95/P99:",
       np.nanmedian(EQ),np.nanquantile(EQ,.95),np.nanquantile(EQ,.99))
 print("Reaction Fz N:",rf_sum[2])
 
-# MODULE 10 — FE centroid tree and graph-to-FE distance QC
 CENT=(P[T[:,0]]+P[T[:,1]]+P[T[:,2]]+P[T[:,3]])/4.0
 tree=cKDTree(CENT)
 
@@ -309,20 +240,13 @@ distance_qc=pd.DataFrame({
     "k32_farthest_mm":dist64[:,31],
     "k64_farthest_mm":dist64[:,63],
 })
-display(distance_qc.describe(percentiles=[.5,.9,.95,.99]))
 
-# A graph node should lie close to the solid FE domain.
 nearest_p95=float(np.quantile(dist64[:,0],.95))
 nearest_max=float(np.max(dist64[:,0]))
 DIST_GATE=max(2*pitch,0.35)  # predeclared geometry-scale sanity gate
 DISTANCE_QC_PASS=nearest_p95<=DIST_GATE
 
-print("nearest-distance P95:",nearest_p95,"mm")
-print("nearest-distance max:",nearest_max,"mm")
-print("distance gate:",DIST_GATE,"mm")
-print("DISTANCE_QC_PASS =",DISTANCE_QC_PASS)
 
-# MODULE 11 — IDW mapping for k = 16, 32, 64
 def idw_map(values,dist,idx,k,power=2.0,eps=1e-9):
     d=dist[:,:k]
     ii=idx[:,:k]
@@ -341,9 +265,29 @@ for k in MAPPING_K_VALUES:
         "eq_strain":idw_map(EQ,dist64,idx64,k).astype(np.float32),
     }
 
-print("Mapped nodes:",len(GPOS),"for k =",MAPPING_K_VALUES)
+sens_rows=[]
+for k in MAPPING_K_VALUES:
+    if k == PRIMARY_K:
+        continue
+    for field in ["vm", "eq_strain"]:
+        reference=np.asarray(mapped[PRIMARY_K][field],dtype=np.float64)
+        candidate=np.asarray(mapped[k][field],dtype=np.float64)
+        rmse=float(np.sqrt(np.mean((candidate-reference)**2)))
+        reference_rms=float(np.sqrt(np.mean(reference**2)))
+        sens_rows.append({
+            "k":k,
+            "field":field,
+            "rmse":rmse,
+            "relative_rmse":rmse/max(reference_rms,1e-12),
+        })
+sens=pd.DataFrame(sens_rows)
+k64_relative=sens.loc[sens["k"]==64,"relative_rmse"].to_numpy(dtype=float)
+MAPPING_SENSITIVITY_PASS=bool(
+    len(k64_relative)==2 and np.isfinite(k64_relative).all() and
+    np.all(k64_relative<=MAX_MAPPING_RELATIVE_RMSE)
+)
 
-# MODULE 13 — Freeze primary k=32 graph targets and save tabular/PyG outputs
+
 Ystress=mapped[PRIMARY_K]["stress"]
 Ystrain=mapped[PRIMARY_K]["strain"]
 Yvm=mapped[PRIMARY_K]["vm"]
@@ -373,7 +317,6 @@ target_feature_order=[
     "exx","eyy","ezz","exy","exz","eyz","von_mises_MPa","equivalent_strain"
 ]
 
-# Portable NumPy export.
 np.savez_compressed(
     EXPORT/"canonical_graph_with_fea_targets.npz",
     x=GX,
@@ -390,7 +333,6 @@ np.savez_compressed(
     mapping_k=np.int64(PRIMARY_K)
 )
 
-# Preserve the exact frozen Notebook-01.2 PyG graph and append FEA labels.
 graph_with_targets=struct_data.clone()
 graph_with_targets.y_stress=torch.as_tensor(Ystress,dtype=torch.float32)
 graph_with_targets.y_strain=torch.as_tensor(Ystrain,dtype=torch.float32)
@@ -404,46 +346,7 @@ torch.save(
     EXPORT/"canonical_structural_graph_128_with_fea_targets.pt"
 )
 
-print(node_df.head())
-print("✓ Primary graph-target NPZ + PyG exports written")
 
-# MODULE 13 — Freeze primary k=32 graph targets and save tabular outputs
-Ystress=mapped[PRIMARY_K]["stress"]
-Ystrain=mapped[PRIMARY_K]["strain"]
-Yvm=mapped[PRIMARY_K]["vm"]
-Yeq=mapped[PRIMARY_K]["eq_strain"]
-
-colsS=["sxx","syy","szz","sxy","sxz","syz"]
-colsE=["exx","eyy","ezz","exy","exz","eyz"]
-
-node_df=pd.DataFrame({
-    "node_id":np.arange(len(GPOS)),
-    "x":GPOS[:,0],"y":GPOS[:,1],"z":GPOS[:,2],
-    "nearest_fe_centroid_mm":dist64[:,0],
-    "von_mises_MPa":Yvm,
-    "equivalent_strain":Yeq,
-})
-for j,c in enumerate(colsS): node_df[c+"_MPa"]=Ystress[:,j]
-for j,c in enumerate(colsE): node_df[c]=Ystrain[:,j]
-
-node_df.to_csv(EXPORT/"canonical_graph_node_targets_k32.csv",index=False)
-sens.to_csv(EXPORT/"mapping_k_sensitivity.csv",index=False)
-distance_qc.to_csv(EXPORT/"mapping_distance_qc.csv",index=False)
-
-np.savez_compressed(
-    EXPORT/"canonical_graph_with_fea_targets.npz",
-    x=GX,pos=GPOS,edges=GEDGES,edge_attr=GEDGE_ATTR,
-    y_stress=Ystress,y_strain=Ystrain,y_vm=Yvm,y_eq_strain=Yeq,
-    target_feature_order=np.asarray(
-        ["sxx_MPa","syy_MPa","szz_MPa","sxy_MPa","sxz_MPa","syz_MPa",
-         "exx","eyy","ezz","exy","exz","eyz","von_mises_MPa","equivalent_strain"]
-    ),
-    mapping_k=np.int64(PRIMARY_K)
-)
-print(node_df.head())
-print("✓ Primary graph-target exports written")
-
-# MODULE 14 — Reproducible figures
 fig=plt.figure(figsize=(8,7))
 ax=fig.add_subplot(111,projection="3d")
 sc=ax.scatter(GPOS[:,0],GPOS[:,1],GPOS[:,2],c=Yvm,s=24)
@@ -465,7 +368,6 @@ plt.tight_layout()
 plt.savefig(FIG/"mapping_k_sensitivity_vm.png",dpi=220,bbox_inches="tight")
 plt.show()
 
-# MODULE 15 — Final QC and manifest
 FINITE_TARGETS_PASS=(
     np.all(np.isfinite(Ystress)) and np.all(np.isfinite(Ystrain)) and
     np.all(np.isfinite(Yvm)) and np.all(np.isfinite(Yeq))
@@ -487,10 +389,9 @@ qc=pd.DataFrame([
     ["FE→graph distance QC",DISTANCE_QC_PASS],
     ["k32→k64 mapping sensitivity",MAPPING_SENSITIVITY_PASS],
 ],columns=["gate","pass"])
-display(qc)
 
 manifest={
-    "notebook":"02_8_FEA_to_Canonical_Graph_Ground_Truth_Mapping",
+    "stage":"02_8_FEA_to_Canonical_Graph_Ground_Truth_Mapping",
     "production_mesh":"balanced",
     "production_nodes":int(len(P)),
     "production_tets":int(len(T)),
@@ -509,11 +410,7 @@ manifest={
 (EXPORT/"02_8_manifest.json").write_text(json.dumps(manifest,indent=2))
 qc.to_csv(EXPORT/"02_8_qc_gates.csv",index=False)
 
-print("="*70)
-print("READY_FOR_ML =",READY_FOR_ML)
 if READY_FOR_ML:
-    print("✓ Notebook 02.8 COMPLETE — canonical graph targets frozen.")
-    print("✓ NEXT: Notebook 03 — generative multi-scaffold dataset production.")
+    print("FEA field mapping complete: canonical graph targets saved")
 else:
-    print("STOP: one or more mapping/full-field QC gates failed.")
-print("="*70)
+    print("FEA field mapping failed one or more QC gates")

@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Construct canonical TPMS surface and skeleton graphs.
 
-Converted from `1_2 NB.ipynb`. Notebook prose and cell output were intentionally omitted.
 """
-# Notebook-only command removed: %pip install -q trimesh networkx scipy scikit-image matplotlib pandas numpy requests torch torch-geometric
 
-# Environment, reproducibility, and project folders
-import sys, json, math, platform, urllib.request, importlib.util, warnings, time
+import json, math, urllib.request, warnings
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -19,12 +16,6 @@ from skimage.morphology import skeletonize
 import torch
 from torch_geometric.data import Data
 
-try:
-    from IPython.display import display
-except ImportError:
-    def display(value):
-        print(value.to_string() if hasattr(value, "to_string") else value)
-
 SEED = 42
 np.random.seed(SEED)
 rng = np.random.default_rng(SEED)
@@ -32,11 +23,6 @@ rng = np.random.default_rng(SEED)
 ROOT = Path.cwd() / 'tpms_graph_project_v1_1'
 RAW, PROC, FIG = ROOT/'data'/'raw', ROOT/'data'/'processed', ROOT/'figures'
 for p in (RAW, PROC, FIG): p.mkdir(parents=True, exist_ok=True)
-
-print('Python:', sys.version.split()[0])
-for name in ['numpy','pandas','trimesh','scipy','skimage','networkx','torch','torch_geometric']:
-    mod=__import__(name); print(f'{name}:', getattr(mod,'__version__','?'))
-print('Working directory:', ROOT.resolve())
 
 GITHUB_API = 'https://api.github.com/repos/metudust/RegionTPMS/contents/STL_FileDemos'
 
@@ -58,13 +44,12 @@ def generate_gyroid_fallback(path, n=72, cells=3, level=0.0):
     x=np.linspace(-np.pi*cells,np.pi*cells,n)
     X,Y,Z=np.meshgrid(x,x,x,indexing='ij')
     f=np.sin(X)*np.cos(Y)+np.sin(Y)*np.cos(Z)+np.sin(Z)*np.cos(X)
-    # Make a finite-thickness sheet by extracting |f| = threshold as a closed band.
     band=np.abs(f)-0.35
     verts,faces,_,_=measure.marching_cubes(band, level=level)
     m=trimesh.Trimesh(vertices=verts,faces=faces,process=True)
     m.apply_scale(20.0/max(m.extents))
     m.export(path)
-    return path, {'source':'deterministic local Gyroid-like fallback','license':'generated in notebook',
+    return path, {'source':'deterministic local Gyroid-like fallback','license':'generated in stage',
                   'external_sample':False,'generator':{'n':n,'cells':cells,'band_threshold':0.35}}
 
 try:
@@ -73,7 +58,6 @@ try:
 except Exception as e:
     warnings.warn(f'Public download failed ({e}); using deterministic fallback.')
     stl_path, provenance = generate_gyroid_fallback(RAW/'fallback_gyroid.stl')
-print(json.dumps(provenance, indent=2))
 
 GEOMETRY_UNIT = 'STL_unit'  # Change only when source provenance establishes the physical unit.
 loaded=trimesh.load(stl_path, force='mesh')
@@ -90,13 +74,11 @@ summary={
  'largest_component_area_fraction':float(areas.max()/areas.sum()) if len(areas) else None,
  'geometry_unit':GEOMETRY_UNIT
 }
-display(pd.Series(summary))
 if not mesh.is_watertight:
     warnings.warn('Mesh is not watertight. Filled-voxel thickness and later volumetric FEA may be unreliable.')
 clean_stl=PROC/'scaffold_clean.stl'; mesh.export(clean_stl)
 print('Saved cleaned STL:',clean_stl)
 
-# 3D mesh visualization (display-only face sampling)
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 face_ids=np.arange(len(mesh.faces))
 if len(face_ids)>18000: face_ids=rng.choice(face_ids,18000,replace=False)
@@ -115,13 +97,11 @@ deg=np.array([Gm.degree(i) for i in range(len(V))],float)
 mins,maxs=V.min(0),V.max(0); span=np.maximum(maxs-mins,1e-12); pos_norm=(V-mins)/span
 vec=V[E[:,1]]-V[E[:,0]]; length=np.linalg.norm(vec,axis=1); safe=np.maximum(length,1e-12)
 median_edge=float(np.median(length))
-# Resolution-aware boundary tolerance: one median triangle edge, capped at 1% of height.
 boundary_tol=float(min(median_edge,0.01*span[2]))
 bottom=(V[:,2] <= mins[2]+boundary_tol).astype(np.float32)
 top=(V[:,2] >= maxs[2]-boundary_tol).astype(np.float32)
 X_mesh=np.c_[pos_norm,deg/np.maximum(deg.max(),1),bottom,top]
 theta=np.arccos(np.clip(vec[:,2]/safe,-1,1)); phi=np.arctan2(vec[:,1],vec[:,0])
-# No fabricated radius for sheet TPMS.
 edge_attr_mesh=np.c_[length,theta,phi]
 
 nodes_mesh=pd.DataFrame({'node_id':np.arange(len(V)),'x':V[:,0],'y':V[:,1],'z':V[:,2],
@@ -134,9 +114,7 @@ qc_mesh={'num_nodes':len(V),'num_edges':len(E),'connected_components':nx.number_
  'min_edge_length':float(length.min()),'median_edge_length':median_edge,'max_edge_length':float(length.max()),
  'boundary_tolerance':boundary_tol,'bottom_nodes':int(bottom.sum()),'top_nodes':int(top.sum()),
  'finite_edge_features':bool(np.isfinite(edge_attr_mesh).all())}
-display(pd.Series(qc_mesh)); display(nodes_mesh.head()); display(edges_mesh.head())
 
-# Surface graph visualization (sampled edges)
 fig=plt.figure(figsize=(9,8)); ax=fig.add_subplot(111,projection='3d')
 ids=np.arange(len(E));
 if len(ids)>12000: ids=rng.choice(ids,12000,replace=False)
@@ -146,8 +124,6 @@ ax.set(xlabel='X',ylabel='Y',zlabel='Z',title='Representation A — surface mesh
 plt.tight_layout(); plt.show()
 
 from collections import defaultdict, deque
-from scipy import ndimage
-from skimage.morphology import skeletonize
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import eigsh
@@ -173,7 +149,6 @@ def voxelize_filled(mesh, target_resolution):
     return solid,T,pitch
 
 def skeletonize_3d_compat(solid):
-    # Current scikit-image skeletonize supports 3D binary arrays.
     return skeletonize(solid).astype(bool)
 
 def skel_graph(skel, connectivity=26):
@@ -207,7 +182,6 @@ def connected_sets(nodes, adj):
 
 def contract_junction_regions(coords, adj, world):
     deg=np.array([len(a) for a in adj],int)
-    # Junction voxels are degree > 2. Endpoints remain individual terminals.
     jvox=np.where(deg>2)[0]
     jcomps=connected_sets(jvox,adj)
 
@@ -224,7 +198,6 @@ def contract_junction_regions(coords, adj, world):
         supernodes.append({"kind":"endpoint","voxels":[int(v)],"pos":world[v].copy()})
         voxel_to_super[int(v)]=sid
 
-    # Handle rare isolated skeleton voxels explicitly.
     for v in np.where(deg==0)[0]:
         sid=len(supernodes)
         supernodes.append({"kind":"isolated","voxels":[int(v)],"pos":world[v].copy()})
@@ -233,7 +206,6 @@ def contract_junction_regions(coords, adj, world):
     return supernodes,voxel_to_super,deg
 
 def trace_region_branches(coords, adj, world, supernodes, voxel_to_super, deg):
-    # Boundary half-edges leaving any contracted region/end point.
     visited=set(); branches=[]
     for sid,sn in enumerate(supernodes):
         for start_vox in sn["voxels"]:
@@ -249,10 +221,7 @@ def trace_region_branches(coords, adj, world, supernodes, voxel_to_super, deg):
 
                 while end_sid is None:
                     candidates=[x for x in adj[cur] if x!=prev]
-                    # Degree-2 chain should have exactly one forward continuation.
                     if not candidates: break
-                    # If numerical topology creates >1 continuation outside a declared junction,
-                    # stop safely at the current voxel by promoting it later.
                     if len(candidates)>1:
                         break
                     nn=candidates[0]
@@ -261,14 +230,12 @@ def trace_region_branches(coords, adj, world, supernodes, voxel_to_super, deg):
                     end_sid=voxel_to_super.get(cur)
 
                 if end_sid is None:
-                    # Promote unresolved branch tip to a synthetic terminal.
                     end_sid=len(supernodes)
                     supernodes.append({"kind":"synthetic_terminal","voxels":[int(cur)],
                                        "pos":world[cur].copy()})
                     voxel_to_super[int(cur)]=end_sid
 
                 if end_sid==sid:
-                    # Closed micro-loop inside a junction region is not a useful structural branch.
                     continue
 
                 pts=world[path]
@@ -315,7 +282,6 @@ def dedupe_edges(nodes, edges):
     e=e[e.source!=e.target].copy()
     e["a"]=e[["source","target"]].min(axis=1)
     e["b"]=e[["source","target"]].max(axis=1)
-    # Keep the physically shortest path for accidental parallel duplicates.
     e=e.sort_values(["a","b","path_length"]).drop_duplicates(["a","b"],keep="first")
     e=e.drop(columns=["a","b"]).reset_index(drop=True)
     return nodes.copy(),e
@@ -338,7 +304,6 @@ def graph_degrees(nodes,edges):
     return d
 
 def contract_short_edges(nodes, edges, threshold):
-    # Union-find contraction of edges below a physical threshold.
     if len(edges)==0: return nodes,edges
     parent=list(range(len(nodes)))
     def find(x):
@@ -396,7 +361,7 @@ def recompute_edge_geometry(nodes,edges):
         s,t=int(r.source),int(r.target)
         dv=P[t]-P[s]; chord=float(np.linalg.norm(dv))
         theta=float(np.arctan2(dv[1],dv[0]))
-        phi=float(np.arccos(np.clip(dv[2]/chord,-1,1))) if chord>0 else 0.
+        phi=float(np.arccos(np.clip(dv[2]/chord,-1,1))) if chord>0 else 0.0
         plen=max(float(r.path_length),chord)
         vals.append((chord,plen,plen/chord if chord>0 else np.nan,theta,phi))
     e[["chord_length","path_length","tortuosity","theta","phi"]]=np.asarray(vals,float)
@@ -426,7 +391,6 @@ def spectral_signature(nodes,edges,k=12):
     except Exception:
         return np.array([])
 
-print("Robust skeleton/graph utilities loaded.")
 
 RESOLUTIONS=[64,128,256]
 CONNECTIVITY=26
@@ -458,7 +422,6 @@ def analyze_and_simplify(mesh,target_resolution,connectivity=26):
     nodes,edges=reindex_graph(nodes,edges)
     edges=recompute_edge_geometry(nodes,edges)
 
-    # Add final degrees.
     degf=graph_degrees(nodes,edges)
     nodes["degree"]=degf
 
@@ -472,7 +435,7 @@ def analyze_and_simplify(mesh,target_resolution,connectivity=26):
         "simplified_nodes":len(nodes),
         "simplified_edges":len(edges),
         "components":graph_components(nodes,edges),
-        "total_path_length":float(edges.path_length.sum()) if len(edges) else 0.,
+        "total_path_length":float(edges.path_length.sum()) if len(edges) else 0.0,
         "median_path_length":float(edges.path_length.median()) if len(edges) else np.nan,
         "mean_tortuosity":float(edges.tortuosity.mean()) if len(edges) else np.nan,
         "median_local_thickness":median_t,
@@ -495,7 +458,6 @@ for n in RESOLUTIONS:
     summaries.append(s); resolution_results[n]=r
 
 convergence=pd.DataFrame(summaries)
-display(convergence)
 
 def pct_change(a,b):
     return 100.0*abs(b-a)/max(abs(a),1e-12)
@@ -510,9 +472,7 @@ for a,b in zip(RESOLUTIONS[:-1],RESOLUTIONS[1:]):
     for m in metrics: row[m+"_pct"]=pct_change(float(ra[m]),float(rb[m]))
     rows.append(row)
 conv_pct=pd.DataFrame(rows)
-display(conv_pct)
 
-# Distributional comparison: branch-length quantiles.
 q=[0.1,0.25,0.5,0.75,0.9]
 distrows=[]
 for n in RESOLUTIONS:
@@ -522,9 +482,7 @@ for n in RESOLUTIONS:
         rr[f"L_q{int(qq*100)}"]=float(val)
     distrows.append(rr)
 length_quantiles=pd.DataFrame(distrows)
-display(length_quantiles)
 
-# Spectral signatures.
 spectral_rows=[]
 for n in RESOLUTIONS:
     vals=resolution_results[n]["spectrum"]
@@ -532,7 +490,6 @@ for n in RESOLUTIONS:
     for i,v in enumerate(vals[:10],1): row[f"lambda_{i}"]=float(v)
     spectral_rows.append(row)
 spectral_df=pd.DataFrame(spectral_rows)
-display(spectral_df)
 
 fig,ax=plt.subplots(figsize=(7,4))
 ax.plot(convergence.target_resolution,convergence.simplified_nodes,marker="o",label="nodes")
@@ -550,7 +507,6 @@ for conn in [6,18,26]:
     solid,T,pitch=voxelize_filled(mesh,128)
     skel=skeletonize_3d_compat(solid)
     coords,adj=skel_graph(skel,conn)
-    # raw skeleton connected components
     ii=[]; jj=[]
     for i,a in enumerate(adj):
         for j in a:
@@ -562,7 +518,6 @@ for conn in [6,18,26]:
     connectivity_rows.append({"connectivity":conn,"skeleton_voxels":len(coords),
                               "raw_skeleton_components":comps})
 connectivity_df=pd.DataFrame(connectivity_rows)
-display(connectivity_df)
 
 CANONICAL_RESOLUTION = 128
 SENSITIVITY_RESOLUTION = 256
@@ -571,7 +526,6 @@ canonical = resolution_results[CANONICAL_RESOLUTION]
 nodes_struct = canonical["nodes"].copy()
 edges_struct = canonical["edges"].copy()
 
-# Characteristic surface edge length, computed self-contained.
 surface_edge_vectors = V[E[:,0]] - V[E[:,1]]
 surface_edge_lengths = np.linalg.norm(surface_edge_vectors,axis=1)
 edge_scale = float(np.median(surface_edge_lengths))
@@ -579,11 +533,9 @@ edge_scale = float(np.median(surface_edge_lengths))
 zmin,zmax = float(V[:,2].min()),float(V[:,2].max())
 boundary_tol = max(2.0*edge_scale,1e-6*(zmax-zmin))
 
-# Direct face-intersection-style flags are retained as diagnostics only.
 nodes_struct["bottom_flag"] = (nodes_struct.z <= zmin+boundary_tol).astype(int)
 nodes_struct["top_flag"] = (nodes_struct.z >= zmax-boundary_tol).astype(int)
 
-# Continuous distances are more appropriate for an interior medial representation.
 nodes_struct["dist_to_bottom"] = nodes_struct.z - zmin
 nodes_struct["dist_to_top"] = zmax - nodes_struct.z
 
@@ -593,18 +545,6 @@ norm=(xyz-lo)/span
 nodes_struct[["x_norm","y_norm","z_norm"]] = norm
 nodes_struct["degree_norm"] = nodes_struct.degree/np.maximum(nodes_struct.degree.max(),1)
 
-print(f"Canonical structural resolution: {CANONICAL_RESOLUTION}³")
-print("nodes:",len(nodes_struct))
-print("edges:",len(edges_struct))
-print("components:",graph_components(nodes_struct,edges_struct))
-print("endpoints:",int((nodes_struct.degree==1).sum()))
-print("junctions:",int((nodes_struct.degree>=3).sum()))
-print("direct bottom flags:",int(nodes_struct.bottom_flag.sum()))
-print("direct top flags:",int(nodes_struct.top_flag.sum()))
-print("minimum distance to bottom:",float(nodes_struct.dist_to_bottom.min()))
-print("minimum distance to top:",float(nodes_struct.dist_to_top.min()))
-display(nodes_struct.head())
-display(edges_struct.head())
 
 fig=plt.figure(figsize=(9,8))
 ax=fig.add_subplot(111,projection="3d")
@@ -658,21 +598,11 @@ qc_df=pd.DataFrame({"gate":list(qc.keys()),
                     "status":["PASS" if bool(v) else "WARN" for v in qc.values()]})
 diag_df=pd.DataFrame({"diagnostic":list(diagnostics.keys()),
                       "value":list(diagnostics.values())})
-display(qc_df)
-display(diag_df)
-
 READY_FOR_FEA=all(bool(v) for v in qc.values())
 print("READY_FOR_FEA =",READY_FOR_FEA)
-print("\nNOTE: total-node and endpoint changes are reported but are not post-hoc pass/fail gates.")
-if READY_FOR_FEA:
-    print("Canonical geometry representation is frozen at 128³ for the next-stage FEA mapping.")
-else:
+if not READY_FOR_FEA:
     print("Inspect WARN gates before proceeding.")
 
-import torch
-from torch_geometric.data import Data
-
-# ---------- Surface graph ----------
 surface_xyz=V.astype(float)
 surface_lo=surface_xyz.min(axis=0); surface_hi=surface_xyz.max(axis=0)
 surface_span=np.maximum(surface_hi-surface_lo,1e-12)
@@ -708,7 +638,6 @@ surface_data=Data(
     pos=torch.tensor(V,dtype=torch.float32)
 )
 
-# ---------- Canonical structural graph ----------
 struct_node_features=required_node
 struct_edge_features=required_edge
 
@@ -727,15 +656,6 @@ struct_data=Data(
     pos=torch.tensor(nodes_struct[["x","y","z"]].to_numpy(float),dtype=torch.float32)
 )
 
-print("SURFACE GRAPH")
-print(surface_data)
-print("\nCANONICAL STRUCTURAL GRAPH")
-print(struct_data)
-print("\nSurface x / edge_index / edge_attr:",
-      surface_data.x.shape,surface_data.edge_index.shape,surface_data.edge_attr.shape)
-print("Structural x / edge_index / edge_attr:",
-      struct_data.x.shape,struct_data.edge_index.shape,struct_data.edge_attr.shape)
-print("✓ PyTorch Geometric conversion completed.")
 
 nodes_mesh.to_csv(PROC/"mesh_nodes.csv",index=False)
 edges_mesh.to_csv(PROC/"mesh_edges.csv",index=False)
@@ -754,7 +674,7 @@ torch.save(struct_data,PROC/"canonical_structural_graph_128.pt")
 mesh.export(PROC/"scaffold_clean.stl")
 
 metadata={
-    "notebook_version":"01.2-final",
+    "stage_version":"01.2-final",
     "source_file":str(stl_path),
     "geometry_unit":GEOMETRY_UNIT,
     "mesh_vertices":int(len(V)),
@@ -782,6 +702,4 @@ metadata={
 }
 (PROC/"metadata_01_2_final.json").write_text(json.dumps(metadata,indent=2))
 
-print("Export directory:",PROC)
-for p in sorted(PROC.iterdir()):
-    print(f"{p.name:45s} {p.stat().st_size/1024/1024:8.2f} MB")
+print(f"Graph construction complete: outputs saved to {PROC}")

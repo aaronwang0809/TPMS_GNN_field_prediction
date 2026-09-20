@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """Assemble, normalize, validate, and freeze the ML graph dataset.
 
-Converted from `06_Final_ML_Graph_Dataset_Assembly_FIXED.ipynb`. Notebook prose and cell output were intentionally omitted.
 """
-# ============================================================
-# MODULE 0 — IMPORTS + FROZEN EXPECTATIONS
-# ============================================================
 import os, json, math, hashlib, time
 from pathlib import Path
 
@@ -32,18 +28,12 @@ KIND_ORDER = ["junction", "endpoint"]
 
 np.random.seed(2026)
 
-print("Notebook 06 — Final ML Graph Dataset Assembly")
-print("Expected verified graphs:", EXPECTED_N)
-print("Expected frozen split:", EXPECTED_SPLITS)
 
-# ============================================================
-# MODULE 1 — DRIVE + 05.3 FINALIZATION + AUTHORITATIVE DESIGN MANIFEST
-# ============================================================
 PROJECT_ROOT = Path(
     os.environ.get("TPMS_PROJECT_ROOT", Path.cwd() / "TPMS_IEEE_BIGDATA")
 ).expanduser().resolve()
-N53_ROOT = PROJECT_ROOT / "Notebook05_3"
-OUT_ROOT = PROJECT_ROOT / "Notebook06"
+N53_ROOT = PROJECT_ROOT / "Stage05_3"
+OUT_ROOT = PROJECT_ROOT / "Stage06"
 GRAPH_ROOT = OUT_ROOT / "graphs"
 GRAPH_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -55,7 +45,7 @@ required_53 = [
 missing = [str(p) for p in required_53 if not p.is_file()]
 if missing:
     raise RuntimeError(
-        "Notebook 05.3 finalization handoff is incomplete. Missing:\n" +
+        "Stage 05.3 finalization handoff is incomplete. Missing:\n" +
         "\n".join(missing)
     )
 
@@ -88,11 +78,6 @@ if index53.architecture.value_counts().to_dict() != EXPECTED_ARCH:
         f"Architecture count mismatch: {index53.architecture.value_counts().to_dict()}"
     )
 
-# ------------------------------------------------------------
-# 05.3 intentionally carries production/QC information.
-# Notebook 06 additionally needs the original frozen design covariates.
-# Rejoin them from the authoritative Notebook-03.1 manifest by sample_id.
-# ------------------------------------------------------------
 MANIFEST_NAME = "03_FINAL_population_120_WITH_SPLITS.csv"
 DESIGN_COLS = [
     "sample_id", "architecture", "iid_split",
@@ -102,25 +87,22 @@ DESIGN_COLS = [
 ]
 
 manifest_candidates = []
-for root in [PROJECT_ROOT, DRIVE_MOUNT / "MyDrive"]:
+for root in [PROJECT_ROOT, PROJECT_ROOT.parent]:
     try:
         manifest_candidates.extend(root.rglob(MANIFEST_NAME))
     except Exception:
         pass
 
-# Deduplicate exact paths.
 manifest_candidates = list(dict.fromkeys(
     p for p in manifest_candidates if p.is_file()
 ))
 
 if not manifest_candidates:
     raise RuntimeError(
-        f"Authoritative Notebook-03.1 manifest not found on Drive: {MANIFEST_NAME}\n"
-        "Do NOT invent missing design parameters. Place the original 03.1 manifest "
-        "or its extracted CSV somewhere under MyDrive/TPMS_IEEE_BIGDATA and rerun."
+        f"Authoritative design manifest not found: {MANIFEST_NAME}\n"
+        "Place the original manifest under the project root or its parent directory."
     )
 
-# Prefer a copy inside the project tree.
 manifest_candidates.sort(
     key=lambda p: (0 if str(p).startswith(str(PROJECT_ROOT)) else 1, len(str(p)))
 )
@@ -140,10 +122,8 @@ manifest["architecture"] = manifest["architecture"].astype(str).str.lower()
 manifest["iid_split"] = manifest["iid_split"].astype(str).str.lower()
 
 if len(manifest) != 120 or not manifest.sample_id.is_unique:
-    raise RuntimeError("Authoritative Notebook-03.1 manifest identity check failed.")
+    raise RuntimeError("Authoritative Stage-03.1 manifest identity check failed.")
 
-# First prove the overlapping identity fields agree; then merge only the design
-# covariates absent from 05.3. This prevents accidental _x/_y column creation.
 identity = index53[["sample_id","architecture","iid_split"]].merge(
     manifest[["sample_id","architecture","iid_split"]],
     on="sample_id", how="left", suffixes=("_05_3","_03_1"), validate="one_to_one"
@@ -151,16 +131,14 @@ identity = index53[["sample_id","architecture","iid_split"]].merge(
 if identity[["architecture_03_1","iid_split_03_1"]].isna().any().any():
     raise RuntimeError("At least one verified 05.3 sample is absent from the 03.1 manifest.")
 if not (identity["architecture_05_3"] == identity["architecture_03_1"]).all():
-    raise RuntimeError("Architecture mismatch between 05.3 and Notebook-03.1 manifest.")
+    raise RuntimeError("Architecture mismatch between 05.3 and Stage-03.1 manifest.")
 if not (identity["iid_split_05_3"] == identity["iid_split_03_1"]).all():
-    raise RuntimeError("iid_split mismatch between 05.3 and Notebook-03.1 manifest.")
+    raise RuntimeError("iid_split mismatch between 05.3 and Stage-03.1 manifest.")
 
 covariate_cols = [
     "sample_id", "cell_size_mm", "grading_mode", "grading_amplitude",
     "phase_x_rad", "phase_y_rad", "phase_z_rad",
 ]
-# target_relative_density already exists in the 05.3 index, but verify it against
-# the authoritative manifest rather than silently replacing it.
 rho_check = index53[["sample_id","target_relative_density"]].merge(
     manifest[["sample_id","target_relative_density"]],
     on="sample_id", how="left", suffixes=("_05_3","_03_1"), validate="one_to_one"
@@ -185,18 +163,7 @@ if index53[covariate_cols[1:]].isna().any().any():
     display(bad)
     raise RuntimeError("Missing design covariates after authoritative manifest merge.")
 
-print("✓ NOTEBOOK 05.3 FINALIZED HANDOFF VERIFIED")
-print("✓ AUTHORITATIVE NOTEBOOK-03.1 DESIGN MANIFEST REJOINED")
-print("  Manifest:", MANIFEST_FILE)
-print("✓ cell_size_mm / grading / phase parameters available for all 110 graphs")
-print("✓ 110 verified samples")
-print("✓ frozen split = 70 train / 19 validation / 21 test")
-print("✓ architecture counts =", EXPECTED_ARCH)
-print("✓ SAFE TO ASSEMBLE ML DATASET")
 
-# ============================================================
-# MODULE 2 — FEATURE DEFINITIONS + CHECKPOINT READER
-# ============================================================
 NODE_RAW_CONT = ["x", "y", "z", "degree", "region_voxels", "target_relative_density"]
 NODE_BINARY = ["is_junction", "is_endpoint"]
 
@@ -263,7 +230,6 @@ def read_verified_graph(row):
     edges = pd.read_csv(d / "canonical_edges.csv")
     targ = load_npz_dict(d / "graph_targets_scalar.npz")
 
-    # Frozen production identity / science gates.
     if meta.get("checkpoint_verified") is not True:
         raise RuntimeError(f"{sid}: checkpoint_verified is not true")
     if meta.get("solver_completed") is not True or int(meta.get("ccx_returncode",-1)) != 0:
@@ -329,7 +295,6 @@ def read_verified_graph(row):
     if np.any(y_vm < 0) or np.any(y_eq < 0):
         raise RuntimeError(f"{sid}: negative scalar target found")
 
-    # Raw continuous node features.
     node_raw_cont = np.column_stack([
         nodes["x"].to_numpy(np.float32),
         nodes["y"].to_numpy(np.float32),
@@ -344,7 +309,6 @@ def read_verified_graph(row):
         (nodes["kind"].astype(str).to_numpy() == "endpoint").astype(np.float32),
     ]).astype(np.float32)
 
-    # Convert each undirected canonical edge to both directions for message passing.
     edge_index = np.vstack([
         np.concatenate([src, dst]),
         np.concatenate([dst, src]),
@@ -386,14 +350,7 @@ def read_verified_graph(row):
         "num_edges_directed": edge_index.shape[1],
     }
 
-print("Node continuous raw features:", NODE_RAW_CONT)
-print("Node binary features:", NODE_BINARY)
-print("Edge encoded features:", EDGE_RAW)
-print("Graph design features:", GRAPH_FEATURE_NAMES)
 
-# ============================================================
-# MODULE 3 — READ + VALIDATE ALL 110 VERIFIED GRAPHS
-# ============================================================
 t0 = time.time()
 raw_graphs = []
 errors = []
@@ -413,7 +370,7 @@ for i, (_, row) in enumerate(index53.iterrows(), 1):
 
 if errors:
     display(pd.DataFrame(errors, columns=["sample_id","error"]))
-    raise RuntimeError(f"{len(errors)} graph(s) failed Notebook-06 validation.")
+    raise RuntimeError(f"{len(errors)} graph(s) failed Stage-06 validation.")
 
 if len(raw_graphs) != EXPECTED_N:
     raise RuntimeError(f"Expected 110 validated graphs; got {len(raw_graphs)}")
@@ -422,18 +379,7 @@ ids = [g["sample_id"] for g in raw_graphs]
 if len(ids) != len(set(ids)):
     raise RuntimeError("Duplicate sample IDs detected in assembled dataset.")
 
-print("=" * 88)
-print("ALL VERIFIED CHECKPOINTS READ SUCCESSFULLY")
-print("=" * 88)
-print("Graphs:", len(raw_graphs))
-print("Total graph nodes:", f"{sum(g['num_nodes'] for g in raw_graphs):,}")
-print("Total undirected edges:", f"{sum(g['num_edges_undirected'] for g in raw_graphs):,}")
-print("Total directed message-passing edges:", f"{sum(g['num_edges_directed'] for g in raw_graphs):,}")
-print("Read/validation minutes:", round((time.time()-t0)/60, 2))
 
-# ============================================================
-# MODULE 4 — FIT NORMALIZATION ON TRAINING DATA ONLY
-# ============================================================
 train_graphs = [g for g in raw_graphs if g["iid_split"] == "train"]
 val_graphs = [g for g in raw_graphs if g["iid_split"] == "validation"]
 test_graphs = [g for g in raw_graphs if g["iid_split"] == "test"]
@@ -470,13 +416,10 @@ edge_mean, edge_std, n_train_edges = streaming_mean_std(
 graph_train = np.stack([g["graph_raw"] for g in train_graphs])
 graph_mean = graph_train.mean(axis=0).astype(np.float32)
 graph_std = graph_train.std(axis=0).astype(np.float32)
-# Do not z-score architecture one-hot; preserve categorical identity.
 graph_mean[:3] = 0.0
 graph_std[:3] = 1.0
 graph_std[graph_std < 1e-12] = 1.0
 
-# Targets: fit on TRAIN NODES ONLY. Use log1p for positive, strongly right-skewed fields.
-# This remains exactly invertible and stabilizes scale across stress/strain magnitudes.
 train_vm = np.concatenate([g["y_vm"] for g in train_graphs]).astype(np.float64)
 train_eq = np.concatenate([g["y_eq_strain"] for g in train_graphs]).astype(np.float64)
 
@@ -510,15 +453,7 @@ normalization = {
     "fit_directed_edges": n_train_edges,
 }
 
-print("✓ NORMALIZATION FIT ON TRAINING DATA ONLY")
-print("Training graphs:", len(train_graphs))
-print("Training nodes:", f"{n_train_nodes:,}")
-print("Training directed edges:", f"{n_train_edges:,}")
-print("Target transform: log1p → training-only z-score")
 
-# ============================================================
-# MODULE 5 — TRANSFORM + SAVE ONE COMPACT NPZ PER GRAPH
-# ============================================================
 def zscore(a, mean, std):
     return ((a - mean) / std).astype(np.float32)
 
@@ -559,7 +494,6 @@ for i, g in enumerate(raw_graphs, 1):
         iid_split=np.asarray(g["iid_split"]),
     )
 
-    # Read-back verification immediately.
     with np.load(out, allow_pickle=False) as z:
         if z["x"].shape != x.shape:
             raise RuntimeError(f"{g['sample_id']}: saved x shape mismatch")
@@ -596,21 +530,15 @@ dataset_index = pd.DataFrame(records)
 if len(dataset_index) != EXPECTED_N:
     raise RuntimeError("Saved graph index is not exactly 110 rows.")
 
-print("✓ SAVED + READ-BACK VERIFIED", len(dataset_index), "GRAPH FILES")
-display(dataset_index.head())
 
-# ============================================================
-# MODULE 6 — DATASET-LEVEL QC + LEAKAGE AUDIT
-# ============================================================
-# Exact identity agreement with 05.3.
 if set(dataset_index.sample_id) != set(index53.sample_id):
-    raise RuntimeError("Notebook-06 sample identity differs from Notebook-05.3.")
+    raise RuntimeError("Stage-06 sample identity differs from Stage-05.3.")
 
 if dataset_index.iid_split.value_counts().to_dict() != EXPECTED_SPLITS:
-    raise RuntimeError("Notebook-06 split counts differ from frozen split.")
+    raise RuntimeError("Stage-06 split counts differ from frozen split.")
 
 if dataset_index.architecture.value_counts().to_dict() != EXPECTED_ARCH:
-    raise RuntimeError("Notebook-06 architecture counts differ from 05.3.")
+    raise RuntimeError("Stage-06 architecture counts differ from 05.3.")
 
 split_sets = {
     s: set(dataset_index.loc[dataset_index.iid_split == s, "sample_id"])
@@ -623,33 +551,7 @@ if split_sets["train"] & split_sets["test"]:
 if split_sets["validation"] & split_sets["test"]:
     raise RuntimeError("Validation/test identity leakage.")
 
-print("=" * 88)
-print("FINAL ML DATASET QC")
-print("=" * 88)
-print("Graphs:", len(dataset_index))
-print("Split counts:", dataset_index.iid_split.value_counts().to_dict())
-print("Architecture counts:", dataset_index.architecture.value_counts().to_dict())
-print()
-print("Architecture × split:")
-display(pd.crosstab(dataset_index.architecture, dataset_index.iid_split))
 
-print("Graph size summary:")
-display(
-    dataset_index.groupby("architecture")[
-        ["num_nodes","num_edges_undirected","num_edges_directed"]
-    ].agg(["min","median","mean","max"])
-)
-
-print("✓ no sample identity overlap between train / validation / test")
-print("✓ all normalization statistics fitted from TRAIN ONLY")
-print("✓ physical targets retained in y_phys for evaluation")
-print("✓ normalized targets stored in y for training")
-
-# ============================================================
-# MODULE 7 — OPTIONAL PYTORCH GEOMETRIC COMPATIBILITY SMOKE TEST
-# ============================================================
-# Notebook 07 will use PyTorch/PyG. This cell verifies that the saved NPZ
-# representation converts cleanly to a PyG Data object without changing data.
 
 try:
     import torch
@@ -677,18 +579,10 @@ try:
     if data.edge_index.shape[1] != data.edge_attr.shape[0]:
         raise RuntimeError("PyG smoke test: edge/index mismatch")
 
-    print("✓ PyTorch Geometric compatibility smoke test PASS")
-    print(data)
-    print("node feature dim:", data.x.shape[1])
-    print("edge feature dim:", data.edge_attr.shape[1])
-    print("target dim:", data.y.shape[1])
 
 except Exception as e:
     raise RuntimeError(f"PyG compatibility smoke test failed: {type(e).__name__}: {e}") from e
 
-# ============================================================
-# MODULE 8 — SAVE FROZEN NOTEBOOK-06 HANDOFF
-# ============================================================
 index_path = OUT_ROOT / "06_final_ml_dataset_index.csv"
 norm_path = OUT_ROOT / "06_normalization_train_only.json"
 schema_path = OUT_ROOT / "06_dataset_schema.json"
@@ -719,7 +613,7 @@ schema = {
 schema_path.write_text(json.dumps(schema, indent=2))
 
 summary06 = {
-    "notebook": "06",
+    "stage": "06",
     "status": "FINALIZED",
     "graphs": int(len(dataset_index)),
     "train": int((dataset_index.iid_split=="train").sum()),
@@ -740,13 +634,12 @@ summary06 = {
 }
 summary_path.write_text(json.dumps(summary06, indent=2))
 
-# Final read-back existence/count gate.
 saved_npz = sorted(GRAPH_ROOT.glob("*.npz"))
 if len(saved_npz) != EXPECTED_N:
     raise RuntimeError(f"Expected 110 saved graph NPZs; found {len(saved_npz)}")
 
 marker_path.write_text(
-    "Notebook 06 FINALIZED\n"
+    "Stage 06 FINALIZED\n"
     "graphs=110\n"
     "train=70\nvalidation=19\ntest=21\n"
     "targets=von_mises_stress,equivalent_strain\n"
@@ -754,16 +647,7 @@ marker_path.write_text(
     "post_qc_resplit=false\n"
 )
 
-print("=" * 88)
-print("NOTEBOOK 06 FINALIZATION GATE")
-print("=" * 88)
-for p in [index_path, norm_path, schema_path, summary_path, marker_path]:
-    print("✓", p)
-print()
-print("✓ 110 / 110 verified graphs assembled")
-print("✓ frozen 70 / 19 / 21 split preserved")
-print("✓ training-only normalization frozen")
-print("✓ physical + normalized scalar targets preserved")
-print("✓ PyG-compatible graph representation validated")
-print("✓ NOTEBOOK 06 FINALIZED")
-print("✓ SAFE TO PROCEED TO NOTEBOOK 07 — GNN TRAINING + BASELINES")
+print(
+    f"Dataset assembly complete: {len(dataset_index)} graphs "
+    f"({len(train_graphs)} train, {len(val_graphs)} validation, {len(test_graphs)} test)"
+)

@@ -1,52 +1,37 @@
 #!/usr/bin/env python3
 """Validate the multi-architecture production geometry, graph, and mesh protocol.
 
-Converted from `04_Multi_Architecture_Production_Protocol_Validation.ipynb`. Notebook prose and cell output were intentionally omitted.
 """
-# MODULE 0 — Install/import dependencies (Colab-safe)
-import os, sys, subprocess, importlib.util
+import sys, subprocess, importlib.util
 
 def ensure(pkg, pip_name=None):
     if importlib.util.find_spec(pkg) is None:
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', pip_name or pkg])
 
-for pkg,pipn in [('trimesh','trimesh'),('tetgen','tetgen'),('skimage','scikit-image'),('networkx','networkx'),('psutil','psutil')]:
+for pkg,pipn in [('trimesh','trimesh'),('tetgen','tetgen'),('skimage','scikit-image')]:
     ensure(pkg,pipn)
 
-import gc, re, json, time, shutil, hashlib, zipfile, ctypes
+import gc, json, time, shutil, zipfile, ctypes
 from pathlib import Path
 import numpy as np, pandas as pd
-import trimesh, tetgen, networkx as nx, psutil
+import trimesh, tetgen
 from scipy import ndimage
-from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import eigsh
-from skimage import measure
 from skimage.measure import marching_cubes
 from skimage.morphology import skeletonize
 
-try:
-    from IPython.display import display
-except ImportError:
-    def display(value):
-        print(value.to_string() if hasattr(value, "to_string") else value)
-
-print('Python:',sys.version.split()[0])
-print('RAM GB:',round(psutil.virtual_memory().total/1e9,2))
-print('TetGen:',getattr(tetgen,'__version__','unknown'))
-
-# MODULE 1 — Frozen protocol and folders
 SEED=20260916
 np.random.seed(SEED)
 
-ROOT=Path.cwd()/"tpms_notebook_04"
+ROOT=Path.cwd()/"tpms_stage_04"
 INPUT=ROOT/"input"; PILOT=ROOT/"pilot"; EXPORT=ROOT/"exports"
 for p in [INPUT,PILOT,EXPORT]: p.mkdir(parents=True,exist_ok=True)
 
 ARCHS=['gyroid','diamond','primitive']
-DOMAIN_MM=np.array([20.,20.,20.])
-ORIGIN_MM=np.array([-10.,-10.,0.])
+DOMAIN_MM=np.array([20.0,20.0,20.0])
+ORIGIN_MM=np.array([-10.0,-10.0,0.0])
 PROD_N=128
 QC_RHO_ABS_ERR_MAX=0.010
 
@@ -65,37 +50,21 @@ MAX_NODES_PREFLIGHT=900_000
 MIN_Q01=0.10
 MAX_EDGE_RATIO_P99=8.0
 
-# Default is safe: geometry+graph+mesh preflight only. Turn on only after reviewing preflight.
 RUN_OPTIONAL_FEA=False
 
 CCX=shutil.which('ccx')
-print('ccx:',CCX)
-print('RUN_OPTIONAL_FEA =',RUN_OPTIONAL_FEA)
-
-# MODULE 2 — Upload/extract frozen Notebook-03.1 package
-# Expected ZIP: 03_1_FINAL_TPMS_DATASET_DESIGN.zip
-try:
-    from google.colab import files
-    uploaded=files.upload()
-    for name,data in uploaded.items():
-        p=INPUT/name; p.write_bytes(data)
-except ImportError:
-    print('Not Colab: place 03_1_FINAL_TPMS_DATASET_DESIGN.zip in',INPUT)
 
 for z in INPUT.glob('*.zip'):
     with zipfile.ZipFile(z) as f: f.extractall(INPUT)
 
 manifest_file=next(iter(INPUT.rglob('03_FINAL_population_120_WITH_SPLITS.csv')),None)
 if manifest_file is None:
-    raise RuntimeError('03_FINAL_population_120_WITH_SPLITS.csv not found. Upload the final Notebook-03.1 ZIP.')
+    raise RuntimeError('03_FINAL_population_120_WITH_SPLITS.csv not found. Upload the final Stage-03.1 ZIP.')
 manifest=pd.read_csv(manifest_file)
 assert len(manifest)==120 and manifest.sample_id.is_unique
 assert set(manifest.architecture)==set(ARCHS)
 assert (manifest.groupby('architecture').size().reindex(ARCHS)==40).all()
-print('Loaded authoritative manifest:',manifest_file)
-display(manifest.groupby(['architecture','iid_split']).size().unstack(fill_value=0))
 
-# MODULE 3 — Frozen implicit TPMS production geometry generator
 
 def tpms_field(arch,X,Y,Z,cell_mm,phase):
     k=2*np.pi/cell_mm
@@ -130,7 +99,7 @@ def calibrate_mask(row,n=PROD_N,tol=2e-4,max_iter=40):
     z_norm=((zs-ORIGIN_MM[2])/DOMAIN_MM[2])[None,None,:]
     g=grading_profile(z_norm,row.grading_mode).astype(np.float32)
     amp=float(row.grading_amplitude); target=float(row.target_relative_density)
-    lo=0.; hi=float(np.quantile(absF,min(.95,max(.60,target+.30))))+1e-6
+    lo=0.0; hi=float(np.quantile(absF,min(.95,max(.60,target+.30))))+1e-6
     def density_at(base):
         thr=base*np.clip(1+amp*g,.20,None); return float(np.mean(absF<=thr))
     while density_at(hi)<target:
@@ -156,13 +125,7 @@ def hard_gc():
     try: ctypes.CDLL('libc.so.6').malloc_trim(0)
     except: pass
 
-# MODULE 4 — Frozen canonical graph helper functions (from Notebook 01.2)
 from collections import defaultdict, deque
-from scipy import ndimage
-from skimage.morphology import skeletonize
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import connected_components
-from scipy.sparse.linalg import eigsh
 
 def neighbor_offsets(connectivity=26):
     out=[]
@@ -185,7 +148,6 @@ def voxelize_filled(mesh, target_resolution):
     return solid,T,pitch
 
 def skeletonize_3d_compat(solid):
-    # Current scikit-image skeletonize supports 3D binary arrays.
     return skeletonize(solid).astype(bool)
 
 def skel_graph(skel, connectivity=26):
@@ -219,7 +181,6 @@ def connected_sets(nodes, adj):
 
 def contract_junction_regions(coords, adj, world):
     deg=np.array([len(a) for a in adj],int)
-    # Junction voxels are degree > 2. Endpoints remain individual terminals.
     jvox=np.where(deg>2)[0]
     jcomps=connected_sets(jvox,adj)
 
@@ -236,7 +197,6 @@ def contract_junction_regions(coords, adj, world):
         supernodes.append({"kind":"endpoint","voxels":[int(v)],"pos":world[v].copy()})
         voxel_to_super[int(v)]=sid
 
-    # Handle rare isolated skeleton voxels explicitly.
     for v in np.where(deg==0)[0]:
         sid=len(supernodes)
         supernodes.append({"kind":"isolated","voxels":[int(v)],"pos":world[v].copy()})
@@ -245,7 +205,6 @@ def contract_junction_regions(coords, adj, world):
     return supernodes,voxel_to_super,deg
 
 def trace_region_branches(coords, adj, world, supernodes, voxel_to_super, deg):
-    # Boundary half-edges leaving any contracted region/end point.
     visited=set(); branches=[]
     for sid,sn in enumerate(supernodes):
         for start_vox in sn["voxels"]:
@@ -261,10 +220,7 @@ def trace_region_branches(coords, adj, world, supernodes, voxel_to_super, deg):
 
                 while end_sid is None:
                     candidates=[x for x in adj[cur] if x!=prev]
-                    # Degree-2 chain should have exactly one forward continuation.
                     if not candidates: break
-                    # If numerical topology creates >1 continuation outside a declared junction,
-                    # stop safely at the current voxel by promoting it later.
                     if len(candidates)>1:
                         break
                     nn=candidates[0]
@@ -273,14 +229,12 @@ def trace_region_branches(coords, adj, world, supernodes, voxel_to_super, deg):
                     end_sid=voxel_to_super.get(cur)
 
                 if end_sid is None:
-                    # Promote unresolved branch tip to a synthetic terminal.
                     end_sid=len(supernodes)
                     supernodes.append({"kind":"synthetic_terminal","voxels":[int(cur)],
                                        "pos":world[cur].copy()})
                     voxel_to_super[int(cur)]=end_sid
 
                 if end_sid==sid:
-                    # Closed micro-loop inside a junction region is not a useful structural branch.
                     continue
 
                 pts=world[path]
@@ -327,7 +281,6 @@ def dedupe_edges(nodes, edges):
     e=e[e.source!=e.target].copy()
     e["a"]=e[["source","target"]].min(axis=1)
     e["b"]=e[["source","target"]].max(axis=1)
-    # Keep the physically shortest path for accidental parallel duplicates.
     e=e.sort_values(["a","b","path_length"]).drop_duplicates(["a","b"],keep="first")
     e=e.drop(columns=["a","b"]).reset_index(drop=True)
     return nodes.copy(),e
@@ -350,7 +303,6 @@ def graph_degrees(nodes,edges):
     return d
 
 def contract_short_edges(nodes, edges, threshold):
-    # Union-find contraction of edges below a physical threshold.
     if len(edges)==0: return nodes,edges
     parent=list(range(len(nodes)))
     def find(x):
@@ -408,7 +360,7 @@ def recompute_edge_geometry(nodes,edges):
         s,t=int(r.source),int(r.target)
         dv=P[t]-P[s]; chord=float(np.linalg.norm(dv))
         theta=float(np.arctan2(dv[1],dv[0]))
-        phi=float(np.arccos(np.clip(dv[2]/chord,-1,1))) if chord>0 else 0.
+        phi=float(np.arccos(np.clip(dv[2]/chord,-1,1))) if chord>0 else 0.0
         plen=max(float(r.path_length),chord)
         vals.append((chord,plen,plen/chord if chord>0 else np.nan,theta,phi))
     e[["chord_length","path_length","tortuosity","theta","phi"]]=np.asarray(vals,float)
@@ -438,9 +390,7 @@ def spectral_signature(nodes,edges,k=12):
     except Exception:
         return np.array([])
 
-print("Robust skeleton/graph utilities loaded.")
 
-# MODULE 5 — Canonical graph extraction directly from the 128³ production mask
 
 def analyze_mask_graph(solid,spacing):
     pitch=float(spacing[0])
@@ -466,18 +416,14 @@ def analyze_mask_graph(solid,spacing):
         'endpoints':int((nodes.degree==1).sum()),'junctions':int((nodes.degree>=3).sum()),
         'median_local_thickness_mm':med,'skeleton_voxels':int(skel.sum())}
 
-# MODULE 6 — Deterministic six-sample pilot selection (low/high density per architecture)
 pilot_rows=[]
 for arch in ARCHS:
     d=manifest[manifest.architecture==arch].sort_values(['target_relative_density','sample_id'])
     pilot_rows += [d.iloc[0],d.iloc[-1]]
 pilots=pd.DataFrame(pilot_rows).reset_index(drop=True)
 pilots['pilot_role']=['low','high']*3
-print('Six geometry-only pilot scaffolds:')
-display(pilots[['sample_id','architecture','pilot_role','target_relative_density','cell_size_mm','grading_mode','grading_amplitude']])
 pilots.to_csv(EXPORT/'04_pilot_selection.csv',index=False)
 
-# MODULE 7 — Regenerate six pilots at 128³ + geometry QC + canonical graph QC
 geom_rows=[]
 for _,row in pilots.iterrows():
     sid=row.sample_id; print('\n',sid,row.architecture,row.pilot_role)
@@ -501,15 +447,12 @@ for _,row in pilots.iterrows():
     nodes.to_csv(d/'canonical_nodes.csv',index=False); edges.to_csv(d/'canonical_edges.csv',index=False)
     np.savez_compressed(d/'geometry_mask_128.npz',mask=mask,spacing=spacing,tau=tau)
     geom_rows.append(out)
-    print({k:out[k] for k in ['rho_abs_error_128','solid_components_26','surface_faces','graph_nodes','graph_edges','geometry_pass','graph_pass']})
     del mask,mesh,nodes,edges; hard_gc()
-geom_qc=pd.DataFrame(geom_rows); display(geom_qc)
+geom_qc=pd.DataFrame(geom_rows)
 geom_qc.to_csv(EXPORT/'04_geometry_graph_preflight.csv',index=False)
 assert geom_qc.geometry_pass.all(), 'STOP: at least one 128³ production geometry failed.'
 assert geom_qc.graph_pass.all(), 'STOP: at least one canonical graph failed.'
-print('✓ All six pilots passed 128³ geometry + graph preflight.')
 
-# MODULE 8 — Balanced TetGen mesh preflight helpers
 
 def tet_volumes(p,t):
     P=p[t]
@@ -537,7 +480,6 @@ def end_sets(p,t,pitch):
     bot=np.unique(bf[(c[:,2]<=z0+tol)&(nz>=.80)]); top=np.unique(bf[(c[:,2]>=z1-tol)&(nz>=.80)])
     return bf,bot,top
 
-# MODULE 9 — Balanced mesh preflight on all six pilots (NO FEA)
 mesh_rows=[]
 for _,row in pilots.iterrows():
     sid=row.sample_id; d=PILOT/sid; print('\nMeshing',sid)
@@ -558,51 +500,39 @@ for _,row in pilots.iterrows():
     rowq['resource_pass']=bool(len(t)<=MAX_TETS_PREFLIGHT and len(p)<=MAX_NODES_PREFLIGHT)
     rowq['quality_pass']=bool(rowq['zero_volume_tets']==0 and rowq['q_p01']>=MIN_Q01 and rowq['edge_ratio_p99']<=MAX_EDGE_RATIO_P99 and len(bot)>100 and len(top)>100)
     np.savez_compressed(d/'balanced_mesh.npz',points=p,tets=t,bottom=bot,top=top)
-    mesh_rows.append(rowq); print(rowq)
+    mesh_rows.append(rowq)
     del surf,tg,res,p,t,vol,q,er,bf,bot,top; hard_gc()
-mesh_preflight=pd.DataFrame(mesh_rows); display(mesh_preflight)
+mesh_preflight=pd.DataFrame(mesh_rows)
 mesh_preflight.to_csv(EXPORT/'04_balanced_mesh_preflight.csv',index=False)
 MESH_PROTOCOL_PREFLIGHT_PASS=bool(mesh_preflight.resource_pass.all() and mesh_preflight.quality_pass.all())
-print('MESH_PROTOCOL_PREFLIGHT_PASS =',MESH_PROTOCOL_PREFLIGHT_PASS)
 if not MESH_PROTOCOL_PREFLIGHT_PASS:
     print('STOP before FEA. Review failed rows; do not loosen gates automatically.')
 
-# MODULE 10 — Select one median-density FEA anchor per architecture
 anchors=[]
 for arch in ARCHS:
     d=manifest[manifest.architecture==arch].copy()
     med=d.target_relative_density.median()
     anchors.append(d.iloc[np.argmin(np.abs(d.target_relative_density.to_numpy()-med))])
 anchors=pd.DataFrame(anchors).reset_index(drop=True)
-print('Optional FEA anchors (one per architecture):')
-display(anchors[['sample_id','architecture','target_relative_density','cell_size_mm','grading_mode']])
 anchors.to_csv(EXPORT/'04_optional_fea_anchors.csv',index=False)
-print('\nNOTE: anchors may differ from the six low/high mesh pilots. RUN_OPTIONAL_FEA defaults to False.')
 
-# MODULE 11 — Optional FEA gate
 if RUN_OPTIONAL_FEA:
     if not MESH_PROTOCOL_PREFLIGHT_PASS:
         raise RuntimeError('Cannot run FEA: six-sample mesh preflight did not pass.')
     if CCX is None:
         raise RuntimeError('CalculiX ccx is not installed/found.')
-    print('FEA requested. For Notebook 04, run one full-field anchor per architecture only after its 128³ geometry and balanced mesh are generated with the same helpers above.')
-    print('This notebook intentionally does not auto-launch unseen anchor meshes/solves in the same cell; keep RUN_OPTIONAL_FEA=False for the first pass and send the preflight table for review.')
-else:
-    print('✓ Safe default: no CalculiX solve launched.')
-    print('Send 04_balanced_mesh_preflight results for review before enabling any multi-hour FEA.')
+    raise NotImplementedError('Optional anchor FEA is not implemented in this module.')
 
-# MODULE 12 — Authoritative Notebook-04 preflight QC + package
 qc=pd.DataFrame({
  'gate':['six pilot geometries selected','all 128^3 geometry QC pass','all canonical graphs connected','six balanced meshes generated','balanced mesh resource gates pass','balanced mesh quality gates pass'],
  'pass':[len(pilots)==6,bool(geom_qc.geometry_pass.all()),bool(geom_qc.graph_pass.all()),len(mesh_preflight)==6,bool(mesh_preflight.resource_pass.all()),bool(mesh_preflight.quality_pass.all())]
 })
-display(qc)
-NOTEBOOK04_PREFLIGHT_PASS=bool(qc['pass'].all())
+STAGE04_PREFLIGHT_PASS=bool(qc['pass'].all())
 summary={
- 'notebook':'04','purpose':'multi-architecture production protocol validation before 120-sample FEA',
+ 'stage':'04','purpose':'multi-architecture production protocol validation before 120-sample FEA',
  'production_resolution':PROD_N,'balanced_tetgen':BALANCED_CFG,'pilot_count':6,
- 'NOTEBOOK04_PREFLIGHT_PASS':NOTEBOOK04_PREFLIGHT_PASS,'RUN_OPTIONAL_FEA':RUN_OPTIONAL_FEA,
- 'next_step':'If preflight passes, review resource envelope; then complete 3 architecture-anchor FEA validation before Notebook 05 full production.'
+ 'STAGE04_PREFLIGHT_PASS':STAGE04_PREFLIGHT_PASS,'RUN_OPTIONAL_FEA':RUN_OPTIONAL_FEA,
+ 'next_step':'If preflight passes, review resource envelope; then complete 3 architecture-anchor FEA validation before Stage 05 full production.'
 }
 with open(EXPORT/'04_protocol_validation_summary.json','w') as f: json.dump(summary,f,indent=2)
 qc.to_csv(EXPORT/'04_authoritative_preflight_qc.csv',index=False)
@@ -610,9 +540,4 @@ qc.to_csv(EXPORT/'04_authoritative_preflight_qc.csv',index=False)
 zip_path=Path.cwd()/'04_TPMS_PRODUCTION_PROTOCOL_PREFLIGHT.zip'
 with zipfile.ZipFile(zip_path,'w',zipfile.ZIP_DEFLATED) as z:
     for p in EXPORT.glob('*'): z.write(p,arcname=p.name)
-print('NOTEBOOK04_PREFLIGHT_PASS =',NOTEBOOK04_PREFLIGHT_PASS)
-print('Package:',zip_path)
-try:
-    from google.colab import files
-    files.download(str(zip_path))
-except ImportError: pass
+print(f'FEA protocol validation complete: pass={STAGE04_PREFLIGHT_PASS}, package={zip_path}')

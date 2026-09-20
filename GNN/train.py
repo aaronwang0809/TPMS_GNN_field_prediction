@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
 """Train and evaluate the frozen GNN baselines and edge-aware model.
 
-Converted from `07_GNN_Training_and_Baselines.ipynb`. Notebook prose and cell output were intentionally omitted.
 """
-# ============================================================
-# MODULE 0 — IMPORTS + FROZEN TRAINING CONFIGURATION
-# ============================================================
-import os, sys, json, time, math, random, copy, subprocess
+import os, sys, json, time, random, subprocess
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-try:
-    from IPython.display import display
-except ImportError:
-    def display(value):
-        print(value.to_string() if hasattr(value, "to_string") else value)
 
 SEED = 2026
 EXPECTED_N = 110
@@ -24,7 +14,6 @@ EXPECTED_SPLITS = {"train": 70, "validation": 19, "test": 21}
 EXPECTED_DIMS = {"node": 8, "edge": 9, "graph": 12, "target": 2}
 TARGET_NAMES = ["von_mises_stress", "equivalent_strain"]
 
-# Conservative, reproducible defaults; validation early stopping avoids wasted GPU time.
 HIDDEN_DIM = 128
 NUM_LAYERS = 4
 DROPOUT = 0.10
@@ -34,12 +23,8 @@ MAX_EPOCHS = 300
 PATIENCE = 35
 MIN_DELTA = 1e-4
 
-# One graph per optimizer step avoids complicated variable-size batching and
-# makes global graph attributes unambiguous. Gradient accumulation gives an
-# effective batch of several graphs without large memory spikes.
 GRAD_ACCUM_STEPS = 4
 
-# Tiny-overfit gate before full training.
 TINY_GRAPHS = 2
 TINY_MAX_STEPS = 250
 TINY_REQUIRED_FRACTION = 0.35  # final tiny loss must be <35% of initial loss
@@ -56,18 +41,12 @@ def seed_everything(seed=SEED):
         pass
 
 seed_everything()
-print("Notebook 07 — GNN Training + Baselines")
-print("Frozen split:", EXPECTED_SPLITS)
-print("Models: NodeMLP, GraphSAGE, EdgeAwareGNN")
 
-# ============================================================
-# MODULE 1 — DRIVE + NOTEBOOK-06 HANDOFF + GPU PREFLIGHT
-# ============================================================
 PROJECT_ROOT = Path(
     os.environ.get("TPMS_PROJECT_ROOT", Path.cwd() / "TPMS_IEEE_BIGDATA")
 ).expanduser().resolve()
-N06_ROOT = PROJECT_ROOT / "Notebook06"
-OUT_ROOT = PROJECT_ROOT / "Notebook07"
+N06_ROOT = PROJECT_ROOT / "Stage06"
+OUT_ROOT = PROJECT_ROOT / "Stage07"
 CKPT_ROOT = OUT_ROOT / "checkpoints"
 PRED_ROOT = OUT_ROOT / "predictions"
 OUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -83,19 +62,17 @@ required = [
 ]
 missing = [str(p) for p in required if not p.is_file()]
 if missing:
-    raise RuntimeError("Notebook 06 handoff incomplete. Missing:\n" + "\n".join(missing))
+    raise RuntimeError("Stage 06 handoff incomplete. Missing:\n" + "\n".join(missing))
 
 index06 = pd.read_csv(N06_ROOT / "06_final_ml_dataset_index.csv")
-schema06 = json.loads((N06_ROOT / "06_dataset_schema.json").read_text())
 norm06 = json.loads((N06_ROOT / "06_normalization_train_only.json").read_text())
-summary06 = json.loads((N06_ROOT / "06_summary.json").read_text())
 
 index06["sample_id"] = index06["sample_id"].astype(str)
 index06["iid_split"] = index06["iid_split"].astype(str).str.lower()
 index06["architecture"] = index06["architecture"].astype(str).str.lower()
 
 if len(index06) != EXPECTED_N or not index06.sample_id.is_unique:
-    raise RuntimeError("Notebook 06 index identity/count check failed.")
+    raise RuntimeError("Stage 06 index identity/count check failed.")
 if index06.iid_split.value_counts().to_dict() != EXPECTED_SPLITS:
     raise RuntimeError(f"Frozen split mismatch: {index06.iid_split.value_counts().to_dict()}")
 
@@ -107,10 +84,10 @@ for k, col in [("node","node_feature_dim"),("edge","edge_feature_dim"),
 
 bad_paths = [p for p in index06.graph_file.astype(str) if not Path(p).is_file()]
 if bad_paths:
-    raise RuntimeError(f"{len(bad_paths)} Notebook-06 graph files are missing. First: {bad_paths[0]}")
+    raise RuntimeError(f"{len(bad_paths)} Stage-06 graph files are missing. First: {bad_paths[0]}")
 
-# Install/import PyG only after the handoff is proven valid.
 import torch
+import torch.nn.functional as F
 try:
     import torch_geometric
 except Exception:
@@ -119,9 +96,6 @@ except Exception:
     import torch_geometric
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("="*88)
-print("NOTEBOOK 07 PREFLIGHT")
-print("="*88)
 print("PyTorch:", torch.__version__)
 print("PyG:", torch_geometric.__version__)
 print("Device:", DEVICE)
@@ -130,23 +104,13 @@ if DEVICE.type == "cuda":
     print("GPU:", torch.cuda.get_device_name(0))
     props = torch.cuda.get_device_properties(0)
     print(f"GPU memory: {props.total_memory/1024**3:.1f} GB")
-    print("✓ GPU detected — SAFE TO START TRAINING PIPELINE")
 else:
-    print("⚠️ CUDA GPU NOT DETECTED.")
-    print("Switch Colab Runtime → Change runtime type → GPU before full training.")
-    raise RuntimeError("GPU required for Notebook 07 full training.")
+    raise RuntimeError("A CUDA GPU is required for full training.")
 
-print("✓ Notebook 06 finalized handoff verified")
-print("✓ 110 graph files present")
-print("✓ frozen 70/19/21 split preserved")
 
-# ============================================================
-# MODULE 2 — DATA LOADER + TARGET INVERSE TRANSFORM
-# ============================================================
 from torch_geometric.data import Data
 
 def _norm_array(key):
-    # Notebook 06 JSON uses explicit target_log_mean/std fields.
     v = norm06[key]
     return np.asarray(v, dtype=np.float64)
 
@@ -177,11 +141,9 @@ def load_graph_row(row, include_y_phys=True):
 train_rows = index06[index06.iid_split == "train"].reset_index(drop=True)
 val_rows = index06[index06.iid_split == "validation"].reset_index(drop=True)
 
-# IMPORTANT: test rows are intentionally not materialized here.
 if len(train_rows) != 70 or len(val_rows) != 19:
     raise RuntimeError("Train/validation split changed.")
 
-# Read one graph and prove tensor shapes.
 d0 = load_graph_row(train_rows.iloc[0])
 assert d0.x.shape[1] == 8
 assert d0.edge_attr.shape[1] == 9
@@ -191,13 +153,7 @@ assert d0.edge_index.shape[0] == 2
 assert torch.isfinite(d0.x).all() and torch.isfinite(d0.edge_attr).all()
 assert torch.isfinite(d0.y).all()
 
-print("✓ Loader smoke test PASS")
-print(d0)
-print("✓ Test split remains untouched during model development")
 
-# ============================================================
-# MODULE 4 — FORWARD/BACKWARD SMOKE TEST (NO EXPENSIVE TRAINING YET)
-# ============================================================
 try:
     from .models import EdgeAwareGNN, MODEL_FACTORIES
 except ImportError:
@@ -226,13 +182,7 @@ for name, factory in MODEL_FACTORIES.items():
     if DEVICE.type == "cuda":
         torch.cuda.empty_cache()
 
-print("✓ ALL MODEL SMOKE TESTS PASS")
-print("✓ SAFE TO RUN TINY-OVERFIT GATE")
 
-# ============================================================
-# MODULE 5 — TINY-OVERFIT GATE FOR PROPOSED MODEL
-# ============================================================
-# A healthy model/pipeline should strongly reduce training loss on two fixed graphs.
 seed_everything()
 tiny_data = [load_graph_row(train_rows.iloc[i]).to(DEVICE) for i in range(TINY_GRAPHS)]
 tiny_model = EdgeAwareGNN().to(DEVICE)
@@ -250,10 +200,10 @@ initial_tiny = mean_tiny_loss()
 for step in range(1, TINY_MAX_STEPS + 1):
     tiny_model.train()
     tiny_opt.zero_grad(set_to_none=True)
-    loss_sum = 0.0
+    losses = []
     for d in tiny_data:
-        loss_sum = loss_sum + F.mse_loss(tiny_model(d), d.y)
-    loss = loss_sum / len(tiny_data)
+        losses.append(F.mse_loss(tiny_model(d), d.y))
+    loss = torch.stack(losses).mean()
     loss.backward()
     torch.nn.utils.clip_grad_norm_(tiny_model.parameters(), 5.0)
     tiny_opt.step()
@@ -262,9 +212,6 @@ for step in range(1, TINY_MAX_STEPS + 1):
 
 final_tiny = mean_tiny_loss()
 ratio = final_tiny / max(initial_tiny, 1e-12)
-print(f"Initial tiny MSE: {initial_tiny:.6f}")
-print(f"Final tiny MSE:   {final_tiny:.6f}")
-print(f"Fraction remaining: {ratio:.3f}")
 
 if not np.isfinite(final_tiny) or ratio >= TINY_REQUIRED_FRACTION:
     raise RuntimeError(
@@ -272,15 +219,10 @@ if not np.isfinite(final_tiny) or ratio >= TINY_REQUIRED_FRACTION:
         f"Required fraction < {TINY_REQUIRED_FRACTION}; got {ratio:.3f}."
     )
 
-print("✓ TINY-OVERFIT GATE PASS")
-print("✓ SAFE TO START FULL TRAINING")
 del tiny_model, tiny_data
 if DEVICE.type == "cuda":
     torch.cuda.empty_cache()
 
-# ============================================================
-# MODULE 6 — TRAINING + VALIDATION FUNCTIONS
-# ============================================================
 def shuffled_rows(df, rng):
     idx = np.arange(len(df))
     rng.shuffle(idx)
@@ -386,32 +328,16 @@ def train_one_model(name, factory):
     return {"model":name, "best_val_mse":best_val, "best_epoch":best_epoch,
             "train_minutes":elapsed/60, "checkpoint":str(ckpt)}
 
-print("✓ Training functions ready")
 
-# ============================================================
-# MODULE 7 — FULL TRAINING: CONTROLLED BASELINES + PROPOSED MODEL
-# ============================================================
-# No test data are accessed in this module.
 results = []
 for model_name in ["NodeMLP", "GraphSAGE", "EdgeAwareGNN"]:
-    print("\n" + "="*88)
-    print("TRAINING", model_name)
-    print("="*88)
+    print(f"Training {model_name}")
     results.append(train_one_model(model_name, MODEL_FACTORIES[model_name]))
 
 val_results = pd.DataFrame(results).sort_values("best_val_mse").reset_index(drop=True)
-display(val_results)
 
 val_results.to_csv(OUT_ROOT / "07_validation_model_comparison.csv", index=False)
-print("✓ Validation comparison saved")
-print("✓ Test split has still not been evaluated")
 
-# ============================================================
-# MODULE 8 — FREEZE MODEL SELECTION BEFORE TOUCHING TEST SET
-# ============================================================
-# The proposed EdgeAwareGNN is the scientific primary model. Validation results
-# are used to freeze its best epoch/checkpoint and to compare against baselines.
-# We do NOT replace the proposed model with a baseline merely because of test results.
 proposed_row = val_results[val_results.model == "EdgeAwareGNN"]
 if len(proposed_row) != 1:
     raise RuntimeError("Expected exactly one EdgeAwareGNN validation result.")
@@ -433,15 +359,8 @@ freeze = {
 }
 (OUT_ROOT / "07_MODEL_SELECTION_FROZEN.json").write_text(json.dumps(freeze, indent=2))
 
-print("="*88)
-print("MODEL SELECTION FROZEN")
-print("="*88)
-print(json.dumps(freeze, indent=2))
-print("✓ Only now is final test evaluation authorized.")
 
-# ============================================================
-# MODULE 9 — ONE-TIME HELD-OUT TEST EVALUATION
-# ============================================================
+
 test_rows = index06[index06.iid_split == "test"].reset_index(drop=True)
 if len(test_rows) != 21:
     raise RuntimeError("Expected exactly 21 held-out test graphs.")
@@ -475,7 +394,6 @@ all_test_metrics = []
 per_graph_records = []
 prediction_files = []
 
-# Evaluate all three frozen validation-selected checkpoints once for a fair test comparison.
 for name in ["NodeMLP", "GraphSAGE", "EdgeAwareGNN"]:
     model = load_best_model(name)
     true_all, pred_all = [], []
@@ -533,17 +451,11 @@ for name in ["NodeMLP", "GraphSAGE", "EdgeAwareGNN"]:
 
 test_metrics = pd.DataFrame(all_test_metrics)
 per_graph_metrics = pd.DataFrame(per_graph_records)
-display(test_metrics)
 
 test_metrics.to_csv(OUT_ROOT / "07_final_test_metrics.csv", index=False)
 per_graph_metrics.to_csv(OUT_ROOT / "07_test_metrics_per_graph.csv", index=False)
 
-print("✓ One-time held-out test evaluation complete")
-print("✓ Proposed-model test predictions saved for Notebook 08")
 
-# ============================================================
-# MODULE 10 — ARCHITECTURE-WISE PROPOSED-MODEL TEST SUMMARY
-# ============================================================
 edge_pg = per_graph_metrics[per_graph_metrics.model == "EdgeAwareGNN"].copy()
 
 arch_rows = []
@@ -557,14 +469,9 @@ for arch, grp in edge_pg.groupby("architecture"):
     arch_rows.append(row)
 
 arch_summary = pd.DataFrame(arch_rows)
-display(arch_summary)
 arch_summary.to_csv(OUT_ROOT / "07_edgeaware_architecture_test_summary.csv", index=False)
 
-print("✓ Architecture-wise summary saved")
 
-# ============================================================
-# MODULE 11 — FINALIZE NOTEBOOK-07 HANDOFF
-# ============================================================
 required_outputs = [
     OUT_ROOT / "07_validation_model_comparison.csv",
     OUT_ROOT / "07_MODEL_SELECTION_FROZEN.json",
@@ -574,7 +481,7 @@ required_outputs = [
 ]
 for p in required_outputs:
     if not p.is_file():
-        raise RuntimeError(f"Missing required Notebook-07 output: {p}")
+        raise RuntimeError(f"Missing required Stage-07 output: {p}")
 
 for name in MODEL_FACTORIES:
     p = CKPT_ROOT / f"{name}_best.pt"
@@ -598,19 +505,6 @@ summary = {
 }
 (OUT_ROOT / "07_summary.json").write_text(json.dumps(summary, indent=2))
 (OUT_ROOT / "07_FINALIZED.txt").write_text(
-    "NOTEBOOK 07 FINALIZED\n"
+    "STAGE 07 FINALIZED\n"
     "Training, validation-only checkpoint selection, and one-time held-out test evaluation complete.\n"
-    "SAFE TO PROCEED TO NOTEBOOK 08 — EVALUATION, ABLATIONS, AND FIGURES\n"
 )
-
-print("="*88)
-print("NOTEBOOK 07 FINALIZATION GATE")
-print("="*88)
-print("✓ 3 controlled models trained on identical frozen training split")
-print("✓ validation-only early stopping/checkpoint selection")
-print("✓ primary EdgeAwareGNN frozen before test access")
-print("✓ held-out test evaluated once after freeze")
-print("✓ physical-unit metrics saved")
-print("✓ proposed-model per-node test predictions saved")
-print("✓ NOTEBOOK 07 FINALIZED")
-print("✓ SAFE TO PROCEED TO NOTEBOOK 08 — EVALUATION, ABLATIONS, AND FIGURES")

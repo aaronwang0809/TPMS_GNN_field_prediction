@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """Consolidate production checkpoints and perform dataset handoff QC.
 
-Converted from `05_3_Production_Consolidation_QC_and_ML_Handoff.ipynb`. Notebook prose and cell output were intentionally omitted.
 """
-# ============================================================
-# MODULE 0 — IMPORTS + MODE
-# ============================================================
-import os, json, zipfile, hashlib, re, math, time
+import os, json, zipfile, math
 from pathlib import Path
-from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -31,12 +26,7 @@ EXPECTED_IDW_POWER = 2.0
 EXPECTED_MESH_LABEL = "S250k"
 MAX_K32_RADIUS_P95_MM = 0.50
 
-print("Notebook 05.3 mode:", MODE)
-print("No FEA will be run in this notebook.")
 
-# ============================================================
-# MODULE 1 — ROBUST GOOGLE DRIVE MOUNT
-# ============================================================
 PROJECT_ROOT = Path(
     os.environ.get("TPMS_PROJECT_ROOT", Path.cwd() / "TPMS_IEEE_BIGDATA")
 ).expanduser().resolve()
@@ -45,17 +35,11 @@ MYDRIVE = PROJECT_ROOT.parent
 if not PROJECT_ROOT.exists():
     raise RuntimeError(f"Project root not found: {PROJECT_ROOT}")
 
-OUT_ROOT = PROJECT_ROOT / "Notebook05_3"
+OUT_ROOT = PROJECT_ROOT / "Stage05_3"
 OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-print("✓ Persistent project root:", PROJECT_ROOT)
-print("✓ 05.3 output root:", OUT_ROOT)
 
-# ============================================================
-# MODULE 2 — FIND OR UPLOAD AUTHORITATIVE NOTEBOOK-03.1 MANIFEST
-# ============================================================
 def find_manifest():
-    # First search likely project/Drive locations.
     candidates = []
     for root in [PROJECT_ROOT, MYDRIVE, Path.cwd()]:
         try:
@@ -63,7 +47,6 @@ def find_manifest():
         except Exception:
             pass
 
-    # Remove duplicates while preserving order.
     seen = set()
     unique = []
     for p in candidates:
@@ -77,8 +60,6 @@ manifest_candidates = find_manifest()
 
 if manifest_candidates:
     MANIFEST_FILE = manifest_candidates[0]
-    print("✓ Found authoritative manifest:")
-    print(" ", MANIFEST_FILE)
 else:
     zip_candidates = list(PROJECT_ROOT.rglob(REQUIRED_ZIP_HINT)) + list(Path.cwd().glob(REQUIRED_ZIP_HINT))
     if len(zip_candidates) != 1:
@@ -104,11 +85,7 @@ else:
         raise RuntimeError(f"Expected one {MANIFEST_NAME}; found {len(found)}.")
     MANIFEST_FILE = found[0]
 
-print("Manifest:", MANIFEST_FILE)
 
-# ============================================================
-# MODULE 3 — AUTHORITATIVE MANIFEST + FROZEN WORKER ASSIGNMENTS
-# ============================================================
 manifest = pd.read_csv(MANIFEST_FILE)
 
 required_cols = {
@@ -136,7 +113,6 @@ if set(arch_counts) != expected_archs:
 if any(arch_counts[a] != 40 for a in expected_archs):
     raise RuntimeError(f"Expected exactly 40 per architecture: {arch_counts}")
 
-# Preserve authoritative manifest order exactly.
 primitive = manifest[manifest.architecture == "primitive"]["sample_id"].tolist()
 diamond   = manifest[manifest.architecture == "diamond"]["sample_id"].tolist()
 gyroid    = manifest[manifest.architecture == "gyroid"]["sample_id"].tolist()
@@ -168,21 +144,9 @@ assignment_df = pd.DataFrame(assignment_rows)
 
 manifest_audit = manifest.merge(assignment_df, on="sample_id", how="left", validate="one_to_one")
 
-print("✓ AUTHORITATIVE MANIFEST PASS")
-print("✓ FROZEN SIX-WORKER ASSIGNMENT PASS")
-display(pd.DataFrame({
-    "worker": list(ASSIGNMENTS),
-    "architecture": ["primitive","primitive","diamond","diamond","gyroid","gyroid"],
-    "assigned": [len(v) for v in ASSIGNMENTS.values()]
-}))
-print("\nFrozen split counts:")
-display(manifest.groupby(["architecture","iid_split"]).size().unstack(fill_value=0))
 
-# ============================================================
-# MODULE 4 — CHECKPOINT ROOTS + SUCCESS/FAILURE VALIDATORS
-# ============================================================
 CHECKPOINT_ROOTS = {
-    worker: PROJECT_ROOT / f"Notebook{worker}" / "production_checkpoints"
+    worker: PROJECT_ROOT / f"Stage{worker}" / "production_checkpoints"
     for worker in ASSIGNMENTS
 }
 
@@ -216,6 +180,18 @@ def validate_npz(path):
     except Exception as e:
         return False, [], {}, {}, f"{type(e).__name__}: {e}"
 
+def safe_int(value, default=-999):
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+def safe_float(value, default=np.nan):
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
 def validate_success_dir(sample_dir, expected_sid, expected_arch, expected_split):
     issues = []
 
@@ -240,28 +216,27 @@ def validate_success_dir(sample_dir, expected_sid, expected_arch, expected_split
                 issues.append("checkpoint_verified_not_true")
             if meta.get("solver_completed") is not True:
                 issues.append("solver_completed_not_true")
-            if int(meta.get("ccx_returncode", -999)) != 0:
+            if safe_int(meta.get("ccx_returncode")) != 0:
                 issues.append(f"ccx_returncode={meta.get('ccx_returncode')}")
             if str(meta.get("mesh_label")) != EXPECTED_MESH_LABEL:
                 issues.append(f"mesh_label={meta.get('mesh_label')}")
-            if int(meta.get("mapping_k", -1)) != EXPECTED_MAPPING_K:
+            if safe_int(meta.get("mapping_k"), -1) != EXPECTED_MAPPING_K:
                 issues.append(f"mapping_k={meta.get('mapping_k')}")
-            if not math.isclose(float(meta.get("idw_power", np.nan)),
+            if not math.isclose(safe_float(meta.get("idw_power")),
                                 EXPECTED_IDW_POWER, rel_tol=0, abs_tol=1e-12):
                 issues.append(f"idw_power={meta.get('idw_power')}")
             if meta.get("full_tensor_targets_authorized") is not False:
                 issues.append("full_tensor_targets_authorized_not_false")
             if list(meta.get("authorized_targets", [])) != EXPECTED_TARGETS:
                 issues.append(f"authorized_targets={meta.get('authorized_targets')}")
-            if int(meta.get("graph_components", -1)) != 1:
+            if safe_int(meta.get("graph_components"), -1) != 1:
                 issues.append(f"graph_components={meta.get('graph_components')}")
-            if int(meta.get("zero_volume_tets", -1)) != 0:
+            if safe_int(meta.get("zero_volume_tets"), -1) != 0:
                 issues.append(f"zero_volume_tets={meta.get('zero_volume_tets')}")
-            radius = float(meta.get("k32_radius_p95_mm", np.nan))
+            radius = safe_float(meta.get("k32_radius_p95_mm"))
             if not np.isfinite(radius) or radius > MAX_K32_RADIUS_P95_MM:
                 issues.append(f"k32_radius_p95_mm={radius}")
 
-    # Make sure compact numerical payloads are actually readable.
     for fname in ["mapping_k32.npz", "target_scalar_elements.npz", "graph_targets_scalar.npz"]:
         p = sample_dir / fname
         if p.is_file():
@@ -274,16 +249,10 @@ def validate_success_dir(sample_dir, expected_sid, expected_arch, expected_split
 
     return meta, issues
 
-for worker, root in CHECKPOINT_ROOTS.items():
-    print(worker, "->", root, "| exists:", root.exists())
 
-# ============================================================
-# MODULE 5 — SCAN ALL 120 ASSIGNED DESIGNS
-# ============================================================
 manifest_lookup = manifest.set_index("sample_id").to_dict("index")
 rows = []
 
-# Detect sample-like folders anywhere in each worker root.
 observed_locations = {}
 for worker, root in CHECKPOINT_ROOTS.items():
     if not root.exists():
@@ -326,7 +295,6 @@ for worker, ids in ASSIGNMENTS.items():
                     failure_stage = str(fail.get("stage", ""))
                     failure_error = str(fail.get("error", ""))
             else:
-                # A folder with intermediate files but no terminal marker is in-progress/partial.
                 status = "MISSING_OR_IN_PROGRESS"
 
         locs = observed_locations.get(sid, [])
@@ -372,9 +340,7 @@ audit = pd.DataFrame(rows)
 if len(audit) != 120 or not audit.sample_id.is_unique:
     raise RuntimeError("05.3 audit did not produce exactly 120 unique manifest designs.")
 
-print("=" * 88)
-print("PRODUCTION STATUS — ALL 120 FROZEN DESIGNS")
-print("=" * 88)
+print("Production status")
 display(audit["status"].value_counts(dropna=False).rename_axis("status").reset_index(name="count"))
 
 print("\nBy architecture:")
@@ -387,9 +353,6 @@ print("\nBy architecture × frozen split (verified only):")
 verified = audit[audit.status == "VERIFIED"].copy()
 display(verified.groupby(["architecture","iid_split"]).size().unstack(fill_value=0))
 
-# ============================================================
-# MODULE 6 — FAILURE PROVENANCE + DISTRIBUTION/QC SUMMARIES
-# ============================================================
 failures = audit[audit.status == "TERMINAL_QC_FAILURE"].copy()
 unfinished = audit[audit.status == "MISSING_OR_IN_PROGRESS"].copy()
 invalid = audit[audit.status.str.startswith("INVALID", na=False)].copy()
@@ -427,7 +390,7 @@ if len(unfinished):
     display(unfinished[["sample_id","architecture","iid_split","worker","worker_position"]])
 
 if len(invalid):
-    print("\nINVALID CHECKPOINTS — must be resolved before Notebook 06:")
+    print("\nINVALID CHECKPOINTS — must be resolved before Stage 06:")
     display(invalid[["sample_id","worker","status","validation_issues"]])
 
 summary_cols = [
@@ -445,9 +408,6 @@ if len(verified):
     print("\nVerified production statistics:")
     display(production_stats)
 
-# ============================================================
-# MODULE 7 — SPLIT ATTRITION AUDIT
-# ============================================================
 split_before = (
     audit.groupby(["architecture","iid_split"])
          .size().rename("original_n").reset_index()
@@ -468,9 +428,7 @@ split_attrition["retention_pct"] = (
     100.0 * split_attrition["verified_n"] / split_attrition["original_n"]
 )
 
-print("=" * 88)
 print("FROZEN SPLIT ATTRITION AUDIT")
-print("=" * 88)
 display(split_attrition)
 
 overall_split = pd.DataFrame({
@@ -485,12 +443,7 @@ overall_split["retention_pct"] = (
 )
 display(overall_split.reset_index())
 
-print("IMPORTANT: Notebook 06 must preserve iid_split exactly as shown here.")
-print("No post-QC random resplitting is authorized.")
 
-# ============================================================
-# MODULE 8 — WRITE CONSOLIDATED 05.3 HANDOFF
-# ============================================================
 audit_path = OUT_ROOT / "05_3_production_audit_120.csv"
 verified_path = OUT_ROOT / "05_3_verified_scalar_dataset_index.csv"
 failure_path = OUT_ROOT / "05_3_terminal_failures.csv"
@@ -505,7 +458,7 @@ split_attrition.to_csv(attrition_path, index=False)
 status_counts = audit.status.value_counts().to_dict()
 
 summary = {
-    "notebook": "05.3",
+    "stage": "05.3",
     "mode": MODE,
     "manifest_file": str(MANIFEST_FILE),
     "manifest_n": int(len(manifest)),
@@ -534,17 +487,11 @@ print("Saved:")
 for p in [audit_path, verified_path, failure_path, attrition_path, summary_path]:
     print(" ✓", p)
 
-# ============================================================
-# MODULE 9 — FINALIZATION GATE
-# ============================================================
 n_verified = int((audit.status == "VERIFIED").sum())
 n_failed = int((audit.status == "TERMINAL_QC_FAILURE").sum())
 n_unfinished = int((audit.status == "MISSING_OR_IN_PROGRESS").sum())
 n_invalid = int(audit.status.str.startswith("INVALID", na=False).sum())
 
-print("=" * 88)
-print("NOTEBOOK 05.3 CONSOLIDATION GATE")
-print("=" * 88)
 print(f"Verified successful checkpoints : {n_verified}")
 print(f"Terminal predefined QC failures : {n_failed}")
 print(f"Missing / still in progress      : {n_unfinished}")
@@ -554,17 +501,14 @@ print()
 
 if n_invalid:
     raise RuntimeError(
-        "INVALID checkpoint(s) detected. Resolve these before Notebook 06."
+        "INVALID checkpoint(s) detected. Resolve these before Stage 06."
     )
 
 if MODE == "PROGRESS":
     if n_unfinished:
-        print("✓ PROGRESS AUDIT COMPLETE")
-        print("Remaining production jobs are allowed in PROGRESS mode.")
-        print("Rerun Notebook 05.3 after they finish, then change MODE='FINALIZE'.")
+        print("Progress audit complete; production jobs remain")
     else:
-        print("✓ ALL 120 DESIGNS ARE TERMINAL")
-        print("Change MODE='FINALIZE' and rerun Module 9 (or Run all) to freeze the handoff.")
+        print("All 120 designs are terminal; rerun with TPMS_QC_MODE=FINALIZE")
 
 elif MODE == "FINALIZE":
     if n_unfinished:
@@ -577,19 +521,13 @@ elif MODE == "FINALIZE":
             "FINALIZE REFUSED: terminal accounting does not equal 120."
         )
 
-    # Final handoff marker.
     marker = OUT_ROOT / "05_3_FINALIZED.txt"
     marker.write_text(
-        "Notebook 05.3 FINALIZED\n"
+        "Stage 05.3 FINALIZED\n"
         f"verified={n_verified}\n"
         f"terminal_qc_failures={n_failed}\n"
         "post_qc_resplit=false\n"
         "targets=von_mises_stress,equivalent_strain\n"
     )
 
-    print("✓ NOTEBOOK 05.3 FINALIZED")
-    print("✓ All 120 frozen designs have a terminal, auditable disposition.")
-    print(f"✓ Notebook 06 will receive {n_verified} verified graphs.")
-    print(f"✓ {n_failed} predefined QC failure(s) remain excluded with provenance.")
-    print("✓ Frozen iid_split assignments are preserved.")
-    print("✓ SAFE TO PROCEED TO NOTEBOOK 06")
+    print(f"Production QC finalized: {n_verified} verified, {n_failed} excluded")
