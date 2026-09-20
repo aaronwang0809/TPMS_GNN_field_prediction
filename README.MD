@@ -13,5 +13,6 @@ Run the production pipeline in this order: `Geometry/tpms_generation.py` → pre
 Before running the pipeline, install Python 3.11, NumPy, pandas, SciPy, scikit-image, trimesh, Matplotlib, NetworkX, TetGen, psutil, a CUDA-compatible build of PyTorch, PyTorch Geometric, and CalculiX with the `ccx` executable available on the system `PATH`.
 
 ## Citation
+If any code was used or referenced, please cite:
 
-A. Wang, “Topology-Aware Graph Neural Networks for Stress-Strain Mapping in Generative 3D Porous Titanium Scaffolds,” 2026.
+A. Wang, “TPMS_GNN_field_prediction,” GitHub, 2026. [Online]. Available: https://github.com/aaronwang0809/TPMS_GNN_field_prediction. 
